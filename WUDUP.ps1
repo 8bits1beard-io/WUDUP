@@ -29,7 +29,10 @@ $script:RegPath_Pause     = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy
 $script:RegPath_PolicySt  = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\PolicyState'
 $script:RegPath_DO_Policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'
 $script:RegPath_DO_MDM    = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\DeliveryOptimization'
-$script:RegPath_NTCur     = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$script:RegPath_NTCur        = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$script:RegPath_Enrollments  = 'HKLM:\SOFTWARE\Microsoft\Enrollments'
+$script:RegPath_WUAutoUpdate = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update'
+$script:RegPath_CBS          = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'
 
 # ============================================================================
 #  LOOKUP TABLES
@@ -104,6 +107,50 @@ function Get-AllRegistryValues {
     return $result
 }
 
+function Test-ActiveMDMEnrollment {
+    if (-not (Test-Path $script:RegPath_Enrollments)) { return $null }
+    try {
+        $subkeys = Get-ChildItem -Path $script:RegPath_Enrollments -ErrorAction SilentlyContinue
+        foreach ($key in $subkeys) {
+            $state = Get-SafeRegistryValue -Path $key.PSPath -Name 'EnrollmentState'
+            $provider = Get-SafeRegistryValue -Path $key.PSPath -Name 'ProviderID'
+            if ($state -eq 1 -and $null -ne $provider -and $provider -ne '') {
+                return $provider
+            }
+        }
+    }
+    catch { }
+    return $null
+}
+
+function Get-WUServiceState {
+    $result = [PSCustomObject]@{
+        Status    = 'Unknown'
+        StartType = 'Unknown'
+    }
+    try {
+        $svc = Get-Service -Name 'wuauserv' -ErrorAction Stop
+        $result.Status = $svc.Status.ToString()
+        $result.StartType = $svc.StartType.ToString()
+    }
+    catch { }
+    return $result
+}
+
+function Get-UpdateStatus {
+    $rebootWU = Test-Path "$script:RegPath_WUAutoUpdate\RebootRequired"
+    $rebootCBS = Test-Path "$script:RegPath_CBS\RebootPending"
+    $lastInstall = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Install" -Name 'LastSuccessTime'
+    $lastDetect = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Detect" -Name 'LastSuccessTime'
+    return [PSCustomObject]@{
+        RebootRequired   = ($rebootWU -or $rebootCBS)
+        RebootRequiredWU = $rebootWU
+        RebootRequiredCBS = $rebootCBS
+        LastInstallTime  = $lastInstall
+        LastDetectTime   = $lastDetect
+    }
+}
+
 function Ensure-RegistryPath {
     param(
         [Parameter(Mandatory)]
@@ -174,40 +221,88 @@ function Get-OSInfo {
 
 function Get-ManagementAuthority {
     $result = [PSCustomObject]@{
-        Authority    = 'Local'
-        Details      = 'Updates managed via Settings app (no policies detected)'
-        WUServer     = $null
+        Authority     = 'Local'
+        Details       = 'Updates managed via Settings app (no policies detected)'
+        WUServer      = $null
         IsMDMManaged  = $false
         IsSCCMManaged = $false
+        IsCoManaged   = $false
         IsGPOManaged  = $false
+        IsWUfB        = $false
         IsWSUS        = $false
-        CanModify    = $true
+        CanModify     = $true
+        MDMProvider   = $null
     }
 
     # Check SCCM/ConfigMgr
     $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
     $ccmKey = Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'
-    if ($null -ne $sccmService -and $ccmKey) {
-        $result.Authority = 'SCCM / ConfigMgr'
-        $result.Details = 'Configuration Manager client detected (ccmexec service running)'
-        $result.IsSCCMManaged = $true
-        $result.CanModify = $false
+    $sccmDetected = ($null -ne $sccmService -and $ccmKey)
+
+    # Check co-management — is the WU workload shifted to Intune?
+    $coMgmtWUShifted = $false
+    if ($sccmDetected) {
+        $coMgmtFlags = Get-SafeRegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\CCM' -Name 'CoManagementFlags'
+        if ($null -ne $coMgmtFlags) {
+            $result.IsCoManaged = $true
+            # Bit 4 (value 16) = Windows Update workload shifted to Intune
+            if (($coMgmtFlags -band 16) -eq 16) {
+                $coMgmtWUShifted = $true
+            }
+        }
     }
 
-    # Check MDM/Intune
+    if ($sccmDetected) {
+        if ($coMgmtWUShifted) {
+            $result.Authority = 'Co-managed (WU via Intune)'
+            $result.Details = 'SCCM client present, but Windows Update workload shifted to Intune'
+            $result.IsSCCMManaged = $true
+            $result.IsMDMManaged = $true
+            $result.CanModify = $false
+        }
+        elseif ($result.IsCoManaged) {
+            $result.Authority = 'SCCM / ConfigMgr (co-managed)'
+            $result.Details = 'Co-management active, but WU workload remains with SCCM'
+            $result.IsSCCMManaged = $true
+            $result.CanModify = $false
+        }
+        else {
+            $result.Authority = 'SCCM / ConfigMgr'
+            $result.Details = 'Configuration Manager client detected (ccmexec service running)'
+            $result.IsSCCMManaged = $true
+            $result.CanModify = $false
+        }
+    }
+
+    # Check MDM/Intune — verify active enrollment before trusting PolicyManager values
     $mdmValues = Get-AllRegistryValues -Path $script:RegPath_MDM
+    $mdmProvider = Test-ActiveMDMEnrollment
     if ($mdmValues.Count -gt 0) {
-        $result.Authority = 'MDM / Intune'
-        $result.Details = 'Mobile Device Management policies detected'
-        $result.IsMDMManaged = $true
-        $result.CanModify = $false
+        if ($null -ne $mdmProvider) {
+            $result.MDMProvider = $mdmProvider
+            if (-not $result.IsSCCMManaged) {
+                $result.Authority = 'MDM / Intune'
+                $result.Details = "Active MDM enrollment detected (Provider: $mdmProvider)"
+                $result.IsMDMManaged = $true
+                $result.CanModify = $false
+            }
+        }
+        else {
+            # MDM policy keys exist but no active enrollment — likely stale
+            if (-not $result.IsSCCMManaged) {
+                $result.Authority = 'MDM (stale?)'
+                $result.Details = 'MDM policy keys found but no active enrollment detected — may be leftover'
+                $result.IsMDMManaged = $true
+                $result.CanModify = $true
+            }
+        }
     }
 
     # Check WSUS
     $wuServer = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'WUServer'
     $useWU = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'UseWUServer'
     if ($null -ne $wuServer -and $useWU -eq 1) {
-        if (-not $result.IsSCCMManaged) {
+        if (-not $result.IsSCCMManaged -and -not $result.IsMDMManaged) {
             $result.Authority = 'WSUS'
             $result.Details = "WSUS Server: $wuServer"
             $result.IsWSUS = $true
@@ -216,13 +311,25 @@ function Get-ManagementAuthority {
         $result.WUServer = $wuServer
     }
 
-    # Check Group Policy (WUfB / GPO) — only if nothing higher-priority was found
-    if ($result.Authority -eq 'Local') {
+    # Check Group Policy — distinguish traditional GPO from WUfB
+    if ($result.Authority -eq 'Local' -or $result.Authority -eq 'MDM (stale?)') {
         $gpValues = Get-AllRegistryValues -Path $script:RegPath_WU
         $auValues = Get-AllRegistryValues -Path $script:RegPath_AU
         if ($gpValues.Count -gt 0 -or $auValues.Count -gt 0) {
-            $result.Authority = 'Group Policy'
-            $result.Details = 'Windows Update policies applied via Group Policy / WUfB'
+            # WUfB indicator: deferral policies present without WSUS
+            $hasDeferrals = ($null -ne $gpValues['DeferFeatureUpdatesPeriodInDays'] -or
+                             $null -ne $gpValues['DeferQualityUpdatesPeriodInDays'])
+            $hasWSUS = ($useWU -eq 1 -and $null -ne $wuServer)
+
+            if ($hasDeferrals -and -not $hasWSUS) {
+                $result.Authority = 'WUfB (Group Policy)'
+                $result.Details = 'Windows Update for Business deferral policies detected via Group Policy'
+                $result.IsWUfB = $true
+            }
+            else {
+                $result.Authority = 'Group Policy'
+                $result.Details = 'Traditional Windows Update policies applied via Group Policy'
+            }
             $result.IsGPOManaged = $true
             $result.CanModify = $true
         }
@@ -246,6 +353,7 @@ function Get-UpdatePolicies {
     $wuStatusServer = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'WUStatusServer'
     $useWUServer = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'UseWUServer'
     $noInternet = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DoNotConnectToWindowsUpdateInternetLocations'
+    $disableUXAccess = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetDisableUXWUAccess'
 
     # --- Deferrals (multi-source with priority) ---
     $gpFeatureDefer = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DeferFeatureUpdatesPeriodInDays'
@@ -327,6 +435,12 @@ function Get-UpdatePolicies {
     elseif ($null -ne $doMDM)  { $doMode = $doMDM; $doSource = 'MDM' }
     else                       { $doMode = $null;   $doSource = 'Default (OS-managed)' }
 
+    # --- Dual-Scan Detection ---
+    $dualScan = $false
+    if ($useWUServer -eq 1 -and ($null -ne $gpFeatureDefer -or $null -ne $gpQualityDefer)) {
+        $dualScan = $true
+    }
+
     return [PSCustomObject]@{
         # OS Pinning
         TargetReleaseVersion     = $targetEnabled
@@ -337,6 +451,8 @@ function Get-UpdatePolicies {
         WUStatusServer           = $wuStatusServer
         UseWUServer              = $useWUServer
         BlockInternetWU          = $noInternet
+        DisableUXWUAccess        = $disableUXAccess
+        DualScanDetected         = $dualScan
         # Deferrals
         FeatureDeferralDays      = $featureDefer
         FeatureDeferralSource    = $featureSource
@@ -433,7 +549,11 @@ function Show-UpdateReport {
         [Parameter(Mandatory)]
         [PSCustomObject]$Authority,
         [Parameter(Mandatory)]
-        [PSCustomObject]$Policies
+        [PSCustomObject]$Policies,
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ServiceState,
+        [Parameter(Mandatory)]
+        [PSCustomObject]$UpdateStatus
     )
 
     $divider = "  " + ("=" * 72)
@@ -469,9 +589,56 @@ function Show-UpdateReport {
     Write-ReportLine "Managed By" $Authority.Authority $authColor
     Write-ReportLine "Details" $Authority.Details 'DarkGray'
 
+    if ($Authority.IsCoManaged) {
+        $coMgmtLabel = if ($Authority.Authority -like '*via Intune*') { 'WU workload shifted to Intune' } else { 'WU workload remains with SCCM' }
+        Write-ReportLine "Co-Management" $coMgmtLabel 'Cyan'
+    }
+
+    if ($null -ne $Authority.MDMProvider) {
+        Write-ReportLine "MDM Provider" $Authority.MDMProvider 'White'
+    }
+
     if (-not $Authority.CanModify) {
         Write-Host ""
         Write-Host "    WARNING: Local registry changes may be overwritten by $($Authority.Authority)." -ForegroundColor Red
+    }
+
+    # --- Windows Update Service ---
+    Write-Section "Windows Update Service"
+    $svcColor = 'Green'
+    if ($ServiceState.Status -eq 'Stopped') { $svcColor = 'Yellow' }
+    if ($ServiceState.StartType -eq 'Disabled') { $svcColor = 'Red' }
+    Write-ReportLine "Service Status" $ServiceState.Status $svcColor
+    Write-ReportLine "Start Type" $ServiceState.StartType $svcColor
+    if ($ServiceState.StartType -eq 'Disabled') {
+        Write-Host ""
+        Write-Host "    WARNING: Windows Update service is disabled - no updates will be processed." -ForegroundColor Red
+    }
+
+    # --- Update Status ---
+    Write-Section "Update Status"
+    if ($UpdateStatus.RebootRequired) {
+        $rebootDetail = @()
+        if ($UpdateStatus.RebootRequiredWU) { $rebootDetail += 'Windows Update' }
+        if ($UpdateStatus.RebootRequiredCBS) { $rebootDetail += 'Component Servicing' }
+        Write-ReportLine "Pending Reboot" "YES ($($rebootDetail -join ', '))" 'Red'
+    }
+    else {
+        Write-ReportLine "Pending Reboot" "No" 'Green'
+    }
+
+    if ($null -ne $UpdateStatus.LastInstallTime -and $UpdateStatus.LastInstallTime -ne '') {
+        Write-ReportLine "Last Install" $UpdateStatus.LastInstallTime 'White'
+    }
+    else {
+        Write-ReportLine "Last Install" "(unknown)" 'DarkGray'
+    }
+
+    if ($null -ne $UpdateStatus.LastDetectTime -and $UpdateStatus.LastDetectTime -ne '') {
+        Write-ReportLine "Last Scan" $UpdateStatus.LastDetectTime 'White'
+    }
+    else {
+        Write-ReportLine "Last Scan" "(unknown)" 'DarkGray'
     }
 
     # --- OS Version Pinning ---
@@ -518,6 +685,13 @@ function Show-UpdateReport {
     }
     else {
         Write-ReportLine "Block Internet WU" "No" 'Green'
+    }
+
+    if ($Policies.DualScanDetected) {
+        Write-Host ""
+        Write-ReportLine "Dual Scan" "DETECTED - WSUS + WUfB deferrals both active" 'Red'
+        Write-Host "    WARNING: Dual scan can cause unexpected update behavior. Feature/quality" -ForegroundColor Yellow
+        Write-Host "    updates may bypass WSUS and come directly from Microsoft Update." -ForegroundColor Yellow
     }
 
     # --- Deferral Policies ---
@@ -586,33 +760,55 @@ function Show-UpdateReport {
         Write-ReportLine "Always Auto Reboot" "No" 'Green'
     }
 
+    if ($Policies.DisableUXWUAccess -eq 1) {
+        Write-ReportLine "Update UI Access" "BLOCKED - Settings > Update hidden from users" 'Red'
+    }
+    else {
+        Write-ReportLine "Update UI Access" "Visible (default)" 'Green'
+    }
+
     # --- Pause Status ---
     Write-Section "Pause Status"
     $featurePaused = $false
     $qualityPaused = $false
 
     # Check if currently paused by examining end dates
+    $featureEndParsed = $false
+    $featureDateUnparseable = $false
     if ($null -ne $Policies.PauseFeatureEnd) {
-        $endStr = Format-PauseDate $Policies.PauseFeatureEnd
         try {
             $endDt = [DateTime]::Parse($Policies.PauseFeatureEnd)
+            $featureEndParsed = $true
             if ($endDt -gt (Get-Date)) { $featurePaused = $true }
         }
-        catch { $featurePaused = $true }
+        catch {
+            # Could not parse date — do not assume paused
+            $featureDateUnparseable = $true
+        }
     }
-    if ($null -ne $Policies.PauseFeatureStatus -and $Policies.PauseFeatureStatus -eq 1) {
-        $featurePaused = $true
+    # Only fall back to status flag when no end date was available to parse
+    if (-not $featureEndParsed -and -not $featureDateUnparseable) {
+        if ($null -ne $Policies.PauseFeatureStatus -and $Policies.PauseFeatureStatus -eq 1) {
+            $featurePaused = $true
+        }
     }
 
+    $qualityEndParsed = $false
+    $qualityDateUnparseable = $false
     if ($null -ne $Policies.PauseQualityEnd) {
         try {
             $endDt = [DateTime]::Parse($Policies.PauseQualityEnd)
+            $qualityEndParsed = $true
             if ($endDt -gt (Get-Date)) { $qualityPaused = $true }
         }
-        catch { $qualityPaused = $true }
+        catch {
+            $qualityDateUnparseable = $true
+        }
     }
-    if ($null -ne $Policies.PauseQualityStatus -and $Policies.PauseQualityStatus -eq 1) {
-        $qualityPaused = $true
+    if (-not $qualityEndParsed -and -not $qualityDateUnparseable) {
+        if ($null -ne $Policies.PauseQualityStatus -and $Policies.PauseQualityStatus -eq 1) {
+            $qualityPaused = $true
+        }
     }
 
     if ($featurePaused) {
@@ -621,6 +817,10 @@ function Show-UpdateReport {
         Write-ReportLine "Feature Updates" "PAUSED" 'Red'
         if ($startStr) { Write-ReportLine "  Paused Since" $startStr 'Red' }
         if ($endStr) { Write-ReportLine "  Resumes" $endStr 'Yellow' }
+    }
+    elseif ($featureDateUnparseable) {
+        Write-ReportLine "Feature Updates" "Unknown (date unreadable)" 'Yellow'
+        Write-ReportLine "  Raw Value" "$($Policies.PauseFeatureEnd)" 'Yellow' "(could not parse date)"
     }
     else {
         Write-ReportLine "Feature Updates" "Not paused" 'Green'
@@ -632,6 +832,10 @@ function Show-UpdateReport {
         Write-ReportLine "Quality Updates" "PAUSED" 'Red'
         if ($startStr) { Write-ReportLine "  Paused Since" $startStr 'Red' }
         if ($endStr) { Write-ReportLine "  Resumes" $endStr 'Yellow' }
+    }
+    elseif ($qualityDateUnparseable) {
+        Write-ReportLine "Quality Updates" "Unknown (date unreadable)" 'Yellow'
+        Write-ReportLine "  Raw Value" "$($Policies.PauseQualityEnd)" 'Yellow' "(could not parse date)"
     }
     else {
         Write-ReportLine "Quality Updates" "Not paused" 'Green'
@@ -1026,10 +1230,12 @@ function Show-ModificationMenu {
             '6' { Set-PauseUpdates }
             '7' { Set-PauseUpdates -Unpause }
             '8' {
-                $osInfo    = Get-OSInfo
-                $authority = Get-ManagementAuthority
-                $policies  = Get-UpdatePolicies
-                Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies
+                $osInfo       = Get-OSInfo
+                $authority    = Get-ManagementAuthority
+                $policies     = Get-UpdatePolicies
+                $serviceState = Get-WUServiceState
+                $updateStatus = Get-UpdateStatus
+                Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies -ServiceState $serviceState -UpdateStatus $updateStatus
             }
             '0' { }
             default {
@@ -1048,11 +1254,13 @@ $isAdmin = Test-IsAdmin
 Write-Host ""
 Write-Host "  Collecting Windows Update configuration..." -ForegroundColor Cyan
 
-$osInfo    = Get-OSInfo
-$authority = Get-ManagementAuthority
-$policies  = Get-UpdatePolicies
+$osInfo       = Get-OSInfo
+$authority    = Get-ManagementAuthority
+$policies     = Get-UpdatePolicies
+$serviceState = Get-WUServiceState
+$updateStatus = Get-UpdateStatus
 
-Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies
+Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies -ServiceState $serviceState -UpdateStatus $updateStatus
 
 if ($isAdmin) {
     Write-Host "  Running as Administrator - modification options available." -ForegroundColor Green
