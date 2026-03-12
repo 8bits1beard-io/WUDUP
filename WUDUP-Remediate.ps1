@@ -8,10 +8,11 @@
     non-compliant (device not managed by WUfB).
 
     Actions:
-    1. Removes WSUS configuration (WUServer, UseWUServer, etc.)
-    2. Sets PolicyDrivenUpdateSource keys to direct all updates to Windows Update
-    3. Applies deferral policies for feature and quality updates
-    4. Optionally sets compliance deadlines, version pin, and active hours
+    1. Checks for SCCM — warns and exits if WU workload is not shifted
+    2. Removes WSUS configuration (WUServer, WUStatusServer, UseWUServer, etc.)
+    3. Sets PolicyDrivenUpdateSource keys to direct all updates to Windows Update
+    4. Applies deferral policies for feature and quality updates
+    5. Optionally sets compliance deadlines, version pin, driver exclusion
 
     All settings are configurable via the CONFIGURATION section below.
 
@@ -20,7 +21,7 @@
 
 .NOTES
     Author:  Device-DNA Project
-    Tool:    WUDUP Remediation v1.1.0
+    Tool:    WUDUP Remediation v1.2.0
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
 
@@ -47,6 +48,9 @@ $Config_AUOption            = 3        # 2=Notify, 3=Auto download+notify, 4=Aut
 # Driver exclusion (set to $null to skip)
 $Config_ExcludeDrivers      = $null    # 1 = exclude drivers from WU, 0 = include, $null = not set
 
+# SCCM behavior: set to $true to allow remediation even on SCCM-managed devices
+$Config_AllowOnSCCM         = $false   # $false = skip remediation if SCCM manages WU workload
+
 # ============================================================================
 #  REGISTRY PATHS
 # ============================================================================
@@ -58,7 +62,7 @@ $RegPath_AU = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
 #  HELPERS
 # ============================================================================
 
-function Get-RegValue {
+function Get-SafeRegistryValue {
     param([string]$Path, [string]$Name)
     try {
         if (Test-Path -Path $Path) {
@@ -70,7 +74,7 @@ function Get-RegValue {
     return $null
 }
 
-function Ensure-Path {
+function Ensure-RegistryPath {
     param([string]$Path)
     if (-not (Test-Path -Path $Path)) {
         New-Item -Path $Path -Force | Out-Null
@@ -79,13 +83,13 @@ function Ensure-Path {
 
 function Set-RegDWord {
     param([string]$Path, [string]$Name, [int]$Value)
-    Ensure-Path -Path $Path
+    Ensure-RegistryPath -Path $Path
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
 }
 
 function Set-RegString {
     param([string]$Path, [string]$Name, [string]$Value)
-    Ensure-Path -Path $Path
+    Ensure-RegistryPath -Path $Path
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType String -Force | Out-Null
 }
 
@@ -103,6 +107,28 @@ function Remove-RegValue {
 try {
     $changes = @()
 
+    # --- Step 0: SCCM guard ---
+    $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
+    $hasSCCM = ($null -ne $sccmService -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'))
+
+    if ($hasSCCM) {
+        # Check if co-management has shifted the WU workload to Intune
+        $coMgmtFlags = Get-SafeRegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\CCM' -Name 'CoManagementFlags'
+        $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
+
+        if (-not $wuShiftedToIntune -and -not $Config_AllowOnSCCM) {
+            Write-Output "SKIPPED: SCCM/ConfigMgr manages WU workload. Local changes will be overwritten. Set Config_AllowOnSCCM=true to override."
+            exit 1
+        }
+
+        if ($wuShiftedToIntune) {
+            $changes += 'SCCM co-managed (WU->Intune)'
+        }
+        else {
+            $changes += 'WARNING: SCCM active, forced via Config_AllowOnSCCM'
+        }
+    }
+
     # --- Step 1: Remove WSUS configuration ---
     $wsusValues = @(
         @{ Path = $RegPath_WU; Name = 'WUServer' },
@@ -113,7 +139,7 @@ try {
     )
 
     foreach ($item in $wsusValues) {
-        $current = Get-RegValue -Path $item.Path -Name $item.Name
+        $current = Get-SafeRegistryValue -Path $item.Path -Name $item.Name
         if ($null -ne $current) {
             Remove-RegValue -Path $item.Path -Name $item.Name
             $changes += "Removed $($item.Name)"

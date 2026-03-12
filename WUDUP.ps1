@@ -359,9 +359,25 @@ function Get-ManagementAuthority {
         $wufbIndicators += 'PreviewBuilds'
     }
 
+    # Driver exclusion
+    if ($null -ne $gpValues['ExcludeWUDriversInQualityUpdate'] -or
+        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ExcludeWUDriversInQualityUpdate')) {
+        $wufbIndicators += 'ExcludeDrivers'
+    }
+
     $hasWSUS = ($useWU -eq 1 -and $null -ne $wuServer)
+    # Check all 4 PolicyDrivenSource types for split-source detection
+    $srcDriver_GP   = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
+    $srcOther_GP    = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
+    $srcDriver_MDM  = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
+    $srcOther_MDM   = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
+    if ($srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0) { $wufbIndicators += 'PolicyDrivenSource(Driver)' }
+    if ($srcOther_GP -eq 0 -or $srcOther_MDM -eq 0)   { $wufbIndicators += 'PolicyDrivenSource(Other)' }
+
     $isSplitSource = ($hasWSUS -and ($srcFeature_GP -eq 0 -or $srcFeature_MDM -eq 0 -or
-                                      $srcQuality_GP -eq 0 -or $srcQuality_MDM -eq 0))
+                                      $srcQuality_GP -eq 0 -or $srcQuality_MDM -eq 0 -or
+                                      $srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0 -or
+                                      $srcOther_GP -eq 0 -or $srcOther_MDM -eq 0))
     $result.IsSplitSource = $isSplitSource
 
     # Classify: GPO with WUfB indicators, GPO without, WSUS with split-source, or Local
@@ -454,6 +470,11 @@ function Get-UpdatePolicies {
     $previewBuilds_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ManagePreviewBuilds'
     $previewBuilds_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ManagePreviewBuilds'
     $previewBuilds     = if ($null -ne $previewBuilds_GP) { $previewBuilds_GP } else { $previewBuilds_MDM }
+
+    # --- Driver Exclusion ---
+    $excludeDrivers_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ExcludeWUDriversInQualityUpdate'
+    $excludeDrivers_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ExcludeWUDriversInQualityUpdate'
+    $excludeDrivers     = if ($null -ne $excludeDrivers_GP) { $excludeDrivers_GP } else { $excludeDrivers_MDM }
 
     # --- Deferrals (multi-source with priority) ---
     $gpFeatureDefer = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DeferFeatureUpdatesPeriodInDays'
@@ -574,6 +595,8 @@ function Get-UpdatePolicies {
         # Channel / Preview
         BranchReadinessLevel     = $branchLevel
         ManagePreviewBuilds      = $previewBuilds
+        # Driver Exclusion
+        ExcludeDrivers           = $excludeDrivers
         # Auto Update
         NoAutoUpdate             = $noAutoUpdate
         AUOptions                = $auOptions
@@ -900,6 +923,16 @@ function Show-UpdateReport {
                 default { "Unknown ($($Policies.ManagePreviewBuilds))" }
             }
             Write-ReportLine "Preview Builds" $previewDesc 'White'
+        }
+    }
+
+    # --- Driver Exclusion ---
+    if ($null -ne $Policies.ExcludeDrivers) {
+        if ($Policies.ExcludeDrivers -eq 1) {
+            Write-ReportLine "Driver Updates" "Excluded from Windows Update" 'Yellow'
+        }
+        else {
+            Write-ReportLine "Driver Updates" "Included in Windows Update" 'Green'
         }
     }
 
@@ -1598,7 +1631,8 @@ function Get-WUfBCleanupItems {
                     'SetPolicyDrivenUpdateSourceForDriverUpdates', 'SetPolicyDrivenUpdateSourceForOtherUpdates',
                     'ConfigureDeadlineForFeatureUpdates', 'ConfigureDeadlineForQualityUpdates',
                     'ConfigureDeadlineGracePeriod', 'ConfigureDeadlineGracePeriodForFeatureUpdates',
-                    'BranchReadinessLevel', 'ManagePreviewBuilds')
+                    'BranchReadinessLevel', 'ManagePreviewBuilds',
+                    'ExcludeWUDriversInQualityUpdate')
     foreach ($v in $wufbValues) {
         $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
         if ($null -ne $current) {
