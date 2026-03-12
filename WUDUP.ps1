@@ -1186,6 +1186,586 @@ function Set-PauseUpdates {
 }
 
 # ============================================================================
+#  BACKUP / RESTORE
+# ============================================================================
+
+function Backup-WUSettings {
+    param(
+        [string]$Reason = 'manual'
+    )
+
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $backupDir = "$env:ProgramData\WUDUP\Backups"
+    if (-not (Test-Path $backupDir)) {
+        New-Item -Path $backupDir -ItemType Directory -Force | Out-Null
+    }
+
+    $backupFile = Join-Path $backupDir "wudup_backup_${timestamp}_${Reason}.reg"
+
+    $backup = [ordered]@{
+        Timestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Reason    = $Reason
+        Paths     = [ordered]@{}
+    }
+
+    $pathsToBackup = @(
+        @{ Name = 'WindowsUpdate';     Path = $script:RegPath_WU }
+        @{ Name = 'AU';                Path = $script:RegPath_AU }
+        @{ Name = 'UXSettings';        Path = $script:RegPath_UX }
+        @{ Name = 'DOPolicy';          Path = $script:RegPath_DO_Policy }
+    )
+
+    foreach ($entry in $pathsToBackup) {
+        $values = Get-AllRegistryValues -Path $entry.Path
+        if ($values.Count -gt 0) {
+            $backup.Paths[$entry.Name] = @{
+                RegistryPath = $entry.Path
+                Values       = $values
+            }
+        }
+    }
+
+    $backup | ConvertTo-Json -Depth 5 | Set-Content -Path $backupFile -Encoding UTF8
+    return $backupFile
+}
+
+function Restore-WUSettings {
+    Write-Host ""
+    Write-Host "  --- Restore Settings from Backup ---" -ForegroundColor Cyan
+    Write-Host ""
+
+    $backupDir = "$env:ProgramData\WUDUP\Backups"
+    if (-not (Test-Path $backupDir)) {
+        Write-Host "  No backups found." -ForegroundColor Yellow
+        return
+    }
+
+    $files = Get-ChildItem -Path $backupDir -Filter '*.reg' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    if ($files.Count -eq 0) {
+        Write-Host "  No backups found." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "  Available backups:" -ForegroundColor White
+    for ($i = 0; $i -lt [Math]::Min($files.Count, 10); $i++) {
+        $f = $files[$i]
+        try {
+            $content = Get-Content -Path $f.FullName -Raw | ConvertFrom-Json
+            $reason = $content.Reason
+            $ts = $content.Timestamp
+        }
+        catch {
+            $reason = 'unknown'
+            $ts = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+        }
+        Write-Host "    [$($i + 1)]  $ts  ($reason)" -ForegroundColor White
+    }
+
+    Write-Host ""
+    $selection = Read-Host "  Select backup to restore (1-$([Math]::Min($files.Count, 10)), blank to cancel)"
+    if ([string]::IsNullOrWhiteSpace($selection)) {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    $idx = [int]$selection - 1
+    if ($idx -lt 0 -or $idx -ge [Math]::Min($files.Count, 10)) {
+        Write-Host "  Invalid selection." -ForegroundColor Yellow
+        return
+    }
+
+    $selectedFile = $files[$idx]
+    try {
+        $backup = Get-Content -Path $selectedFile.FullName -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-Host "  ERROR: Could not read backup file." -ForegroundColor Red
+        return
+    }
+
+    Write-Host ""
+    Write-Host "  This will restore settings from: $($backup.Timestamp) ($($backup.Reason))" -ForegroundColor White
+    Write-Host "  Current settings will be backed up first." -ForegroundColor Gray
+    Write-Host ""
+
+    # Show what will be restored
+    Write-Host "  Registry paths to restore:" -ForegroundColor White
+    foreach ($pathName in $backup.Paths.PSObject.Properties.Name) {
+        $pathData = $backup.Paths.$pathName
+        $regPath = $pathData.RegistryPath
+        $valueCount = $pathData.Values.PSObject.Properties.Name.Count
+        Write-Host "    $regPath ($valueCount values)" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    $confirm = Read-Host "  Proceed with restore? (Y/N)"
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    # Backup current state before restoring
+    $preRestoreBackup = Backup-WUSettings -Reason 'pre-restore'
+    Write-Host "  Current settings backed up to: $preRestoreBackup" -ForegroundColor DarkGray
+
+    try {
+        foreach ($pathName in $backup.Paths.PSObject.Properties.Name) {
+            $pathData = $backup.Paths.$pathName
+            $regPath = $pathData.RegistryPath
+
+            # Clean existing values at this path
+            if (Test-Path $regPath) {
+                $existing = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+                if ($null -ne $existing) {
+                    $existing.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+                        Remove-ItemProperty -Path $regPath -Name $_.Name -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
+            # Write backed-up values
+            Ensure-RegistryPath -Path $regPath
+            foreach ($valName in $pathData.Values.PSObject.Properties.Name) {
+                $val = $pathData.Values.$valName
+                if ($val -is [int] -or $val -is [long]) {
+                    New-ItemProperty -Path $regPath -Name $valName -Value $val -PropertyType DWord -Force | Out-Null
+                }
+                else {
+                    New-ItemProperty -Path $regPath -Name $valName -Value $val.ToString() -PropertyType String -Force | Out-Null
+                }
+            }
+        }
+
+        Write-Host ""
+        Write-Host "  SUCCESS: Settings restored from backup." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Pre-restore backup available at: $preRestoreBackup" -ForegroundColor Yellow
+    }
+}
+
+# ============================================================================
+#  SWITCH UPDATE SOURCE
+# ============================================================================
+
+function Show-SourceChangePreview {
+    param(
+        [string]$TargetSource,
+        [array]$ToRemove,
+        [array]$ToSet
+    )
+
+    Write-Host ""
+    Write-Host "  --- Change Preview ---" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Target: $TargetSource" -ForegroundColor White
+    Write-Host ""
+
+    if ($ToRemove.Count -gt 0) {
+        Write-Host "  Values to REMOVE:" -ForegroundColor Red
+        foreach ($item in $ToRemove) {
+            Write-Host "    [-] $($item.Path)\$($item.Name)" -ForegroundColor Red
+        }
+    }
+
+    if ($ToSet.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  Values to SET:" -ForegroundColor Green
+        foreach ($item in $ToSet) {
+            Write-Host "    [+] $($item.Path)\$($item.Name) = $($item.Value) ($($item.Type))" -ForegroundColor Green
+        }
+    }
+
+    Write-Host ""
+}
+
+function Get-WSUSCleanupItems {
+    $items = @()
+    $wsusValues = @('WUServer', 'WUStatusServer', 'DoNotConnectToWindowsUpdateInternetLocations',
+                    'SetDisableUXWUAccess')
+    foreach ($v in $wsusValues) {
+        $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
+        if ($null -ne $current) {
+            $items += @{ Path = $script:RegPath_WU; Name = $v }
+        }
+    }
+
+    $auValues = @('UseWUServer')
+    foreach ($v in $auValues) {
+        $current = Get-SafeRegistryValue -Path $script:RegPath_AU -Name $v
+        if ($null -ne $current) {
+            $items += @{ Path = $script:RegPath_AU; Name = $v }
+        }
+    }
+
+    return $items
+}
+
+function Get-GPOCleanupItems {
+    $items = @()
+    if (Test-Path $script:RegPath_WU) {
+        $props = Get-ItemProperty -Path $script:RegPath_WU -ErrorAction SilentlyContinue
+        if ($null -ne $props) {
+            $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+                $items += @{ Path = $script:RegPath_WU; Name = $_.Name }
+            }
+        }
+    }
+    if (Test-Path $script:RegPath_AU) {
+        $props = Get-ItemProperty -Path $script:RegPath_AU -ErrorAction SilentlyContinue
+        if ($null -ne $props) {
+            $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+                $items += @{ Path = $script:RegPath_AU; Name = $_.Name }
+            }
+        }
+    }
+    return $items
+}
+
+function Get-PauseCleanupItems {
+    $items = @()
+    $pauseValues = @('PauseFeatureUpdatesStartTime', 'PauseFeatureUpdatesEndTime',
+                     'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime')
+    foreach ($v in $pauseValues) {
+        $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
+        if ($null -ne $current) {
+            $items += @{ Path = $script:RegPath_WU; Name = $v }
+        }
+    }
+    return $items
+}
+
+function Switch-ToWUfB {
+    Write-Host ""
+    Write-Host "  --- Switch to Windows Update for Business ---" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  WUfB uses Microsoft Update with deferral policies (no WSUS)." -ForegroundColor Gray
+    Write-Host "  This will remove any WSUS configuration and set deferral policies." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  NOTE: If this device is managed by Group Policy or MDM, those policies" -ForegroundColor Yellow
+    Write-Host "  will overwrite these local changes on the next sync cycle." -ForegroundColor Yellow
+    Write-Host "  For a permanent switch, update your GPO/Intune policies." -ForegroundColor Yellow
+    Write-Host ""
+
+    # Collect what needs to change
+    $toRemove = @()
+    $toRemove += Get-WSUSCleanupItems
+    $toRemove += Get-PauseCleanupItems
+
+    # Also remove DoNotConnectToWindowsUpdateInternetLocations (must be off for WUfB)
+    # Already included in WSUS cleanup
+
+    # Gather desired WUfB settings
+    Write-Host "  --- WUfB Deferral Configuration ---" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Microsoft recommends: Feature=30-90 days, Quality=3-7 days" -ForegroundColor Gray
+    Write-Host ""
+
+    $featureInput = Read-Host "  Feature update deferral days (0-365, default: 30)"
+    if ([string]::IsNullOrWhiteSpace($featureInput)) { $featureDays = 30 }
+    else { $featureDays = [int]$featureInput }
+    if ($featureDays -lt 0 -or $featureDays -gt 365) {
+        Write-Host "  ERROR: Feature deferral must be 0-365." -ForegroundColor Red
+        return
+    }
+
+    $qualityInput = Read-Host "  Quality update deferral days (0-35, default: 7)"
+    if ([string]::IsNullOrWhiteSpace($qualityInput)) { $qualityDays = 7 }
+    else { $qualityDays = [int]$qualityInput }
+    if ($qualityDays -lt 0 -or $qualityDays -gt 35) {
+        Write-Host "  ERROR: Quality deferral must be 0-35." -ForegroundColor Red
+        return
+    }
+
+    # Optional version pin
+    Write-Host ""
+    $pinChoice = Read-Host "  Pin to a specific OS version? (Y/N, default: N)"
+    $pinVersion = $null
+    $pinProduct = $null
+    if ($pinChoice -eq 'Y' -or $pinChoice -eq 'y') {
+        $currentOS = Get-OSInfo
+        $defaultProduct = 'Windows 10'
+        if ($currentOS.Caption -like '*Windows 11*') { $defaultProduct = 'Windows 11' }
+
+        Write-Host "  Product options:  1) Windows 10   2) Windows 11" -ForegroundColor White
+        $prodChoice = Read-Host "  Select product [default: $defaultProduct]"
+        if ($prodChoice -eq '1') { $pinProduct = 'Windows 10' }
+        elseif ($prodChoice -eq '2') { $pinProduct = 'Windows 11' }
+        else { $pinProduct = $defaultProduct }
+
+        Write-Host "  Common versions:  21H2, 22H2, 23H2, 24H2" -ForegroundColor White
+        $pinVersion = Read-Host "  Enter target version (e.g., 24H2)"
+        if ([string]::IsNullOrWhiteSpace($pinVersion)) {
+            $pinVersion = $null
+            $pinProduct = $null
+        }
+    }
+
+    # Auto-update behavior
+    Write-Host ""
+    Write-Host "  Auto-update behavior:" -ForegroundColor White
+    Write-Host "    3 - Auto download, notify to install (recommended for WUfB)" -ForegroundColor White
+    Write-Host "    4 - Auto download and schedule install" -ForegroundColor White
+    Write-Host "    5 - Allow local admin to choose" -ForegroundColor White
+    $auInput = Read-Host "  Select AU option (2-5, default: 3)"
+    if ([string]::IsNullOrWhiteSpace($auInput)) { $auOption = 3 }
+    else { $auOption = [int]$auInput }
+    if ($auOption -lt 2 -or $auOption -gt 5) {
+        Write-Host "  ERROR: Must be 2-5." -ForegroundColor Red
+        return
+    }
+
+    # Build the set list
+    $toSet = @()
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferFeatureUpdatesPeriodInDays'; Value = $featureDays; Type = 'DWord' }
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferQualityUpdatesPeriodInDays'; Value = $qualityDays; Type = 'DWord' }
+    $toSet += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate'; Value = 0; Type = 'DWord' }
+    $toSet += @{ Path = $script:RegPath_AU; Name = 'AUOptions'; Value = $auOption; Type = 'DWord' }
+
+    if ($null -ne $pinVersion) {
+        $toSet += @{ Path = $script:RegPath_WU; Name = 'TargetReleaseVersion'; Value = 1; Type = 'DWord' }
+        $toSet += @{ Path = $script:RegPath_WU; Name = 'TargetReleaseVersionInfo'; Value = $pinVersion; Type = 'String' }
+        $toSet += @{ Path = $script:RegPath_WU; Name = 'ProductVersion'; Value = $pinProduct; Type = 'String' }
+    }
+
+    # Preview
+    Show-SourceChangePreview -TargetSource 'Windows Update for Business (WUfB)' -ToRemove $toRemove -ToSet $toSet
+
+    $confirm = Read-Host "  Apply these changes? (Y/N)"
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    # Backup first
+    $backupFile = Backup-WUSettings -Reason 'pre-switch-to-wufb'
+    Write-Host "  Settings backed up to: $backupFile" -ForegroundColor DarkGray
+
+    try {
+        # Remove old values
+        foreach ($item in $toRemove) {
+            if (Test-Path $item.Path) {
+                Remove-ItemProperty -Path $item.Path -Name $item.Name -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Set new values
+        foreach ($item in $toSet) {
+            Ensure-RegistryPath -Path $item.Path
+            if ($item.Type -eq 'DWord') {
+                New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType DWord -Force | Out-Null
+            }
+            else {
+                New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType String -Force | Out-Null
+            }
+        }
+
+        Write-Host ""
+        Write-Host "  SUCCESS: Switched to WUfB configuration." -ForegroundColor Green
+        Write-Host "  Feature deferral: $featureDays days, Quality deferral: $qualityDays days" -ForegroundColor Green
+        if ($null -ne $pinVersion) {
+            Write-Host "  Pinned to: $pinProduct $pinVersion" -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Backup available at: $backupFile" -ForegroundColor Yellow
+    }
+}
+
+function Switch-ToWSUS {
+    Write-Host ""
+    Write-Host "  --- Switch to WSUS ---" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  This configures the device to pull updates from a WSUS server." -ForegroundColor Gray
+    Write-Host "  WUfB deferral policies will be removed to avoid dual-scan issues." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  NOTE: If this device is managed by Group Policy or MDM, those policies" -ForegroundColor Yellow
+    Write-Host "  will overwrite these local changes on the next sync cycle." -ForegroundColor Yellow
+    Write-Host ""
+
+    $wuServer = Read-Host "  WSUS Server URL (e.g., http://wsus.contoso.com:8530)"
+    if ([string]::IsNullOrWhiteSpace($wuServer)) {
+        Write-Host "  Cancelled - no server entered." -ForegroundColor Yellow
+        return
+    }
+
+    $statusServer = Read-Host "  WSUS Status Server URL (blank = same as WSUS server)"
+    if ([string]::IsNullOrWhiteSpace($statusServer)) { $statusServer = $wuServer }
+
+    # Collect deferral values to remove (avoid dual-scan)
+    $toRemove = @()
+    $deferralValues = @('DeferFeatureUpdatesPeriodInDays', 'DeferQualityUpdatesPeriodInDays')
+    foreach ($v in $deferralValues) {
+        $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
+        if ($null -ne $current) {
+            $toRemove += @{ Path = $script:RegPath_WU; Name = $v }
+        }
+    }
+    $toRemove += Get-PauseCleanupItems
+
+    $toSet = @()
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'WUServer'; Value = $wuServer; Type = 'String' }
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'WUStatusServer'; Value = $statusServer; Type = 'String' }
+    $toSet += @{ Path = $script:RegPath_AU; Name = 'UseWUServer'; Value = 1; Type = 'DWord' }
+
+    # AU behavior
+    Write-Host ""
+    Write-Host "  Auto-update behavior:" -ForegroundColor White
+    Write-Host "    3 - Auto download, notify to install" -ForegroundColor White
+    Write-Host "    4 - Auto download and schedule install (recommended for WSUS)" -ForegroundColor White
+    Write-Host "    5 - Allow local admin to choose" -ForegroundColor White
+    $auInput = Read-Host "  Select AU option (2-5, default: 4)"
+    if ([string]::IsNullOrWhiteSpace($auInput)) { $auOption = 4 }
+    else { $auOption = [int]$auInput }
+    if ($auOption -lt 2 -or $auOption -gt 5) {
+        Write-Host "  ERROR: Must be 2-5." -ForegroundColor Red
+        return
+    }
+
+    $toSet += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate'; Value = 0; Type = 'DWord' }
+    $toSet += @{ Path = $script:RegPath_AU; Name = 'AUOptions'; Value = $auOption; Type = 'DWord' }
+
+    Show-SourceChangePreview -TargetSource "WSUS ($wuServer)" -ToRemove $toRemove -ToSet $toSet
+
+    $confirm = Read-Host "  Apply these changes? (Y/N)"
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    $backupFile = Backup-WUSettings -Reason 'pre-switch-to-wsus'
+    Write-Host "  Settings backed up to: $backupFile" -ForegroundColor DarkGray
+
+    try {
+        foreach ($item in $toRemove) {
+            if (Test-Path $item.Path) {
+                Remove-ItemProperty -Path $item.Path -Name $item.Name -ErrorAction SilentlyContinue
+            }
+        }
+
+        foreach ($item in $toSet) {
+            Ensure-RegistryPath -Path $item.Path
+            if ($item.Type -eq 'DWord') {
+                New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType DWord -Force | Out-Null
+            }
+            else {
+                New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType String -Force | Out-Null
+            }
+        }
+
+        Write-Host ""
+        Write-Host "  SUCCESS: Switched to WSUS ($wuServer)." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Backup available at: $backupFile" -ForegroundColor Yellow
+    }
+}
+
+function Switch-ToMicrosoftUpdate {
+    Write-Host ""
+    Write-Host "  --- Switch to Microsoft Update (Direct) ---" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  This removes all WSUS and WUfB policy settings, returning the device" -ForegroundColor Gray
+    Write-Host "  to default Windows Update behavior (direct from Microsoft)." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  NOTE: If this device is managed by Group Policy, SCCM, or MDM," -ForegroundColor Yellow
+    Write-Host "  those policies will re-apply on the next sync cycle." -ForegroundColor Yellow
+    Write-Host ""
+
+    $toRemove = Get-GPOCleanupItems
+
+    if ($toRemove.Count -eq 0) {
+        Write-Host "  No policy settings found to remove. Device is already using defaults." -ForegroundColor Green
+        return
+    }
+
+    Show-SourceChangePreview -TargetSource 'Microsoft Update (direct, no policies)' -ToRemove $toRemove -ToSet @()
+
+    $confirm = Read-Host "  Apply these changes? (Y/N)"
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    $backupFile = Backup-WUSettings -Reason 'pre-switch-to-mu-direct'
+    Write-Host "  Settings backed up to: $backupFile" -ForegroundColor DarkGray
+
+    try {
+        foreach ($item in $toRemove) {
+            if (Test-Path $item.Path) {
+                Remove-ItemProperty -Path $item.Path -Name $item.Name -ErrorAction SilentlyContinue
+            }
+        }
+
+        Write-Host ""
+        Write-Host "  SUCCESS: All update policies removed. Using Microsoft Update defaults." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Backup available at: $backupFile" -ForegroundColor Yellow
+    }
+}
+
+function Show-SwitchSourceMenu {
+    Write-Host ""
+    Write-Host ("  " + ("=" * 72)) -ForegroundColor DarkCyan
+    Write-Host "    SWITCH UPDATE SOURCE" -ForegroundColor White
+    Write-Host ("  " + ("=" * 72)) -ForegroundColor DarkCyan
+    Write-Host ""
+
+    # Show current state
+    $currentAuth = Get-ManagementAuthority
+    Write-Host "  Current source: $($currentAuth.Authority)" -ForegroundColor White
+    Write-Host "  $($currentAuth.Details)" -ForegroundColor DarkGray
+
+    if ($currentAuth.IsSCCMManaged -or $currentAuth.IsMDMManaged) {
+        Write-Host ""
+        Write-Host "  WARNING: This device is managed by $($currentAuth.Authority)." -ForegroundColor Red
+        Write-Host "  Local registry changes will likely be overwritten on the next policy sync." -ForegroundColor Red
+        Write-Host "  To permanently switch, update policies in your management console" -ForegroundColor Red
+        if ($currentAuth.IsSCCMManaged) {
+            Write-Host "  (SCCM/ConfigMgr console or co-management workload settings)." -ForegroundColor Red
+        }
+        elseif ($currentAuth.IsMDMManaged) {
+            Write-Host "  (Intune/MDM portal > Device Configuration > Update Rings)." -ForegroundColor Red
+        }
+        Write-Host ""
+        $proceed = Read-Host "  Continue anyway? (Y/N)"
+        if ($proceed -ne 'Y' -and $proceed -ne 'y') {
+            Write-Host "  Cancelled." -ForegroundColor Yellow
+            return
+        }
+    }
+
+    Write-Host ""
+    Write-Host "  Available targets:" -ForegroundColor White
+    Write-Host "    [1]  Windows Update for Business (WUfB)" -ForegroundColor White
+    Write-Host "         Deferrals + Microsoft Update. Best for cloud-managed devices." -ForegroundColor DarkGray
+    Write-Host "    [2]  WSUS" -ForegroundColor White
+    Write-Host "         On-premises update server. Traditional enterprise management." -ForegroundColor DarkGray
+    Write-Host "    [3]  Microsoft Update (direct, no policies)" -ForegroundColor White
+    Write-Host "         Remove all policies. Default consumer behavior." -ForegroundColor DarkGray
+    Write-Host "    [4]  Restore from backup" -ForegroundColor White
+    Write-Host "         Roll back to a previously saved configuration." -ForegroundColor DarkGray
+    Write-Host "    [0]  Cancel" -ForegroundColor White
+    Write-Host ""
+
+    $choice = Read-Host "  Select target"
+
+    switch ($choice) {
+        '1' { Switch-ToWUfB }
+        '2' { Switch-ToWSUS }
+        '3' { Switch-ToMicrosoftUpdate }
+        '4' { Restore-WUSettings }
+        '0' { }
+        default { Write-Host "  Invalid selection." -ForegroundColor Yellow }
+    }
+}
+
+# ============================================================================
 #  MODIFICATION MENU
 # ============================================================================
 
@@ -1215,6 +1795,11 @@ function Show-ModificationMenu {
         Write-Host "    [5]  Set Active Hours" -ForegroundColor White
         Write-Host "    [6]  Pause Updates" -ForegroundColor White
         Write-Host "    [7]  Unpause Updates" -ForegroundColor White
+        Write-Host ""
+        Write-Host "    [S]  Switch Update Source (WUfB / WSUS / Direct)" -ForegroundColor Cyan
+        Write-Host "    [B]  Backup Current Settings" -ForegroundColor Cyan
+        Write-Host "    [R]  Restore Settings from Backup" -ForegroundColor Cyan
+        Write-Host ""
         Write-Host "    [8]  Refresh Report" -ForegroundColor White
         Write-Host "    [0]  Exit" -ForegroundColor White
         Write-Host ""
@@ -1229,6 +1814,22 @@ function Show-ModificationMenu {
             '5' { Set-ActiveHours }
             '6' { Set-PauseUpdates }
             '7' { Set-PauseUpdates -Unpause }
+            'S' { Show-SwitchSourceMenu }
+            's' { Show-SwitchSourceMenu }
+            'B' {
+                $backupFile = Backup-WUSettings -Reason 'manual'
+                Write-Host ""
+                Write-Host "  SUCCESS: Settings backed up to:" -ForegroundColor Green
+                Write-Host "  $backupFile" -ForegroundColor White
+            }
+            'b' {
+                $backupFile = Backup-WUSettings -Reason 'manual'
+                Write-Host ""
+                Write-Host "  SUCCESS: Settings backed up to:" -ForegroundColor Green
+                Write-Host "  $backupFile" -ForegroundColor White
+            }
+            'R' { Restore-WUSettings }
+            'r' { Restore-WUSettings }
             '8' {
                 $osInfo       = Get-OSInfo
                 $authority    = Get-ManagementAuthority
