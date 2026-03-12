@@ -230,6 +230,7 @@ function Get-ManagementAuthority {
         IsGPOManaged  = $false
         IsWUfB        = $false
         IsWSUS        = $false
+        IsSplitSource = $false
         CanModify     = $true
         MDMProvider   = $null
     }
@@ -311,28 +312,87 @@ function Get-ManagementAuthority {
         $result.WUServer = $wuServer
     }
 
-    # Check Group Policy — distinguish traditional GPO from WUfB
-    if ($result.Authority -eq 'Local' -or $result.Authority -eq 'MDM (stale?)') {
-        $gpValues = Get-AllRegistryValues -Path $script:RegPath_WU
-        $auValues = Get-AllRegistryValues -Path $script:RegPath_AU
-        if ($gpValues.Count -gt 0 -or $auValues.Count -gt 0) {
-            # WUfB indicator: deferral policies present without WSUS
-            $hasDeferrals = ($null -ne $gpValues['DeferFeatureUpdatesPeriodInDays'] -or
-                             $null -ne $gpValues['DeferQualityUpdatesPeriodInDays'])
-            $hasWSUS = ($useWU -eq 1 -and $null -ne $wuServer)
+    # Check for WUfB indicators (GP and MDM paths)
+    $wufbIndicators = @()
+    $gpValues = Get-AllRegistryValues -Path $script:RegPath_WU
 
-            if ($hasDeferrals -and -not $hasWSUS) {
-                $result.Authority = 'WUfB (Group Policy)'
-                $result.Details = 'Windows Update for Business deferral policies detected via Group Policy'
-                $result.IsWUfB = $true
+    # PolicyDrivenUpdateSource keys (most definitive, Windows 10 2004+)
+    $srcFeature_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
+    $srcQuality_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
+    $srcFeature_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
+    $srcQuality_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
+    if ($srcFeature_GP -eq 0 -or $srcFeature_MDM -eq 0) { $wufbIndicators += 'PolicyDrivenSource(Feature)' }
+    if ($srcQuality_GP -eq 0 -or $srcQuality_MDM -eq 0) { $wufbIndicators += 'PolicyDrivenSource(Quality)' }
+
+    # Deferral policies
+    if ($null -ne $gpValues['DeferFeatureUpdatesPeriodInDays'] -or
+        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'DeferFeatureUpdatesPeriodInDays')) {
+        $wufbIndicators += 'FeatureDeferral'
+    }
+    if ($null -ne $gpValues['DeferQualityUpdatesPeriodInDays'] -or
+        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'DeferQualityUpdatesPeriodInDays')) {
+        $wufbIndicators += 'QualityDeferral'
+    }
+
+    # Version targeting
+    $targetVer = $gpValues['TargetReleaseVersion']
+    if ($null -eq $targetVer) { $targetVer = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersion' }
+    if ($targetVer -eq 1) { $wufbIndicators += 'VersionTargeting' }
+
+    # Compliance deadlines
+    if ($null -ne $gpValues['ConfigureDeadlineForFeatureUpdates'] -or
+        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates')) {
+        $wufbIndicators += 'FeatureDeadline'
+    }
+    if ($null -ne $gpValues['ConfigureDeadlineForQualityUpdates'] -or
+        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForQualityUpdates')) {
+        $wufbIndicators += 'QualityDeadline'
+    }
+
+    # Channel targeting and preview builds
+    if ($null -ne $gpValues['BranchReadinessLevel'] -or
+        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'BranchReadinessLevel')) {
+        $wufbIndicators += 'BranchReadiness'
+    }
+    if ($null -ne $gpValues['ManagePreviewBuilds'] -or
+        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ManagePreviewBuilds')) {
+        $wufbIndicators += 'PreviewBuilds'
+    }
+
+    $hasWSUS = ($useWU -eq 1 -and $null -ne $wuServer)
+    $isSplitSource = ($hasWSUS -and ($srcFeature_GP -eq 0 -or $srcFeature_MDM -eq 0 -or
+                                      $srcQuality_GP -eq 0 -or $srcQuality_MDM -eq 0))
+    $result.IsSplitSource = $isSplitSource
+
+    # Classify: GPO with WUfB indicators, GPO without, WSUS with split-source, or Local
+    if ($result.Authority -eq 'Local' -or $result.Authority -eq 'MDM (stale?)') {
+        $auValues = Get-AllRegistryValues -Path $script:RegPath_AU
+        if ($wufbIndicators.Count -gt 0 -and (-not $hasWSUS -or $isSplitSource)) {
+            if ($isSplitSource) {
+                $result.Authority = 'WUfB (split-source with WSUS)'
+                $result.Details = "WUfB controls updates via PolicyDrivenSource; WSUS also configured at $wuServer"
             }
             else {
-                $result.Authority = 'Group Policy'
-                $result.Details = 'Traditional Windows Update policies applied via Group Policy'
+                $result.Authority = 'WUfB (Group Policy)'
+                $result.Details = "WUfB policies detected: $($wufbIndicators -join ', ')"
             }
+            $result.IsWUfB = $true
             $result.IsGPOManaged = $true
             $result.CanModify = $true
         }
+        elseif ($gpValues.Count -gt 0 -or $auValues.Count -gt 0) {
+            $result.Authority = 'Group Policy'
+            $result.Details = 'Traditional Windows Update policies applied via Group Policy'
+            $result.IsGPOManaged = $true
+            $result.CanModify = $true
+        }
+    }
+    elseif ($hasWSUS -and $isSplitSource -and -not $result.IsSCCMManaged) {
+        # WSUS was set as authority above, but PolicyDrivenSource overrides for some update types
+        $result.Authority = 'WUfB (split-source with WSUS)'
+        $result.Details = "WUfB controls updates via PolicyDrivenSource; WSUS also configured at $wuServer"
+        $result.IsWUfB = $true
+        $result.IsWSUS = $true
     }
 
     return $result
@@ -354,6 +414,46 @@ function Get-UpdatePolicies {
     $useWUServer = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'UseWUServer'
     $noInternet = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DoNotConnectToWindowsUpdateInternetLocations'
     $disableUXAccess = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetDisableUXWUAccess'
+
+    # --- Policy-Driven Update Source (Windows 10 2004+ / Windows 11) ---
+    $srcFeature_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
+    $srcQuality_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
+    $srcDriver_GP   = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
+    $srcOther_GP    = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
+    $srcFeature_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
+    $srcQuality_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
+    $srcDriver_MDM  = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
+    $srcOther_MDM   = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
+
+    # Resolve: GP wins, then MDM
+    $srcFeature = if ($null -ne $srcFeature_GP) { $srcFeature_GP } elseif ($null -ne $srcFeature_MDM) { $srcFeature_MDM } else { $null }
+    $srcQuality = if ($null -ne $srcQuality_GP) { $srcQuality_GP } elseif ($null -ne $srcQuality_MDM) { $srcQuality_MDM } else { $null }
+    $srcDriver  = if ($null -ne $srcDriver_GP)  { $srcDriver_GP }  elseif ($null -ne $srcDriver_MDM)  { $srcDriver_MDM }  else { $null }
+    $srcOther   = if ($null -ne $srcOther_GP)   { $srcOther_GP }   elseif ($null -ne $srcOther_MDM)   { $srcOther_MDM }   else { $null }
+
+    # --- Compliance Deadlines ---
+    $deadlineFeature_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineForFeatureUpdates'
+    $deadlineQuality_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineForQualityUpdates'
+    $deadlineGrace_GP    = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineGracePeriod'
+    $deadlineGraceFU_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates'
+    $deadlineFeature_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates'
+    $deadlineQuality_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForQualityUpdates'
+    $deadlineGrace_MDM   = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineGracePeriod'
+    $deadlineGraceFU_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates'
+
+    $deadlineFeature = if ($null -ne $deadlineFeature_GP) { $deadlineFeature_GP } else { $deadlineFeature_MDM }
+    $deadlineQuality = if ($null -ne $deadlineQuality_GP) { $deadlineQuality_GP } else { $deadlineQuality_MDM }
+    $deadlineGrace   = if ($null -ne $deadlineGrace_GP)   { $deadlineGrace_GP }   else { $deadlineGrace_MDM }
+    $deadlineGraceFU = if ($null -ne $deadlineGraceFU_GP) { $deadlineGraceFU_GP } else { $deadlineGraceFU_MDM }
+
+    # --- Channel / Preview Builds ---
+    $branchLevel_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'BranchReadinessLevel'
+    $branchLevel_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'BranchReadinessLevel'
+    $branchLevel     = if ($null -ne $branchLevel_GP) { $branchLevel_GP } else { $branchLevel_MDM }
+
+    $previewBuilds_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ManagePreviewBuilds'
+    $previewBuilds_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ManagePreviewBuilds'
+    $previewBuilds     = if ($null -ne $previewBuilds_GP) { $previewBuilds_GP } else { $previewBuilds_MDM }
 
     # --- Deferrals (multi-source with priority) ---
     $gpFeatureDefer = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DeferFeatureUpdatesPeriodInDays'
@@ -436,8 +536,11 @@ function Get-UpdatePolicies {
     else                       { $doMode = $null;   $doSource = 'Default (OS-managed)' }
 
     # --- Dual-Scan Detection ---
+    # Dual-scan: WSUS active + WUfB deferrals, but NO PolicyDrivenSource override
+    # If PolicyDrivenSource is set, it's a valid split-source config, not a dual-scan problem
+    $hasPolicyDrivenSource = ($null -ne $srcFeature -or $null -ne $srcQuality)
     $dualScan = $false
-    if ($useWUServer -eq 1 -and ($null -ne $gpFeatureDefer -or $null -ne $gpQualityDefer)) {
+    if ($useWUServer -eq 1 -and ($null -ne $gpFeatureDefer -or $null -ne $gpQualityDefer) -and -not $hasPolicyDrivenSource) {
         $dualScan = $true
     }
 
@@ -453,11 +556,24 @@ function Get-UpdatePolicies {
         BlockInternetWU          = $noInternet
         DisableUXWUAccess        = $disableUXAccess
         DualScanDetected         = $dualScan
+        # Policy-Driven Update Source
+        SourceFeatureUpdates     = $srcFeature
+        SourceQualityUpdates     = $srcQuality
+        SourceDriverUpdates      = $srcDriver
+        SourceOtherUpdates       = $srcOther
         # Deferrals
         FeatureDeferralDays      = $featureDefer
         FeatureDeferralSource    = $featureSource
         QualityDeferralDays      = $qualityDefer
         QualityDeferralSource    = $qualitySource
+        # Compliance Deadlines
+        DeadlineFeatureDays      = $deadlineFeature
+        DeadlineQualityDays      = $deadlineQuality
+        DeadlineGracePeriod      = $deadlineGrace
+        DeadlineGracePeriodFU    = $deadlineGraceFU
+        # Channel / Preview
+        BranchReadinessLevel     = $branchLevel
+        ManagePreviewBuilds      = $previewBuilds
         # Auto Update
         NoAutoUpdate             = $noAutoUpdate
         AUOptions                = $auOptions
@@ -689,9 +805,32 @@ function Show-UpdateReport {
 
     if ($Policies.DualScanDetected) {
         Write-Host ""
-        Write-ReportLine "Dual Scan" "DETECTED - WSUS + WUfB deferrals both active" 'Red'
+        Write-ReportLine "Dual Scan" "DETECTED - WSUS + WUfB deferrals, no PolicyDrivenSource" 'Red'
         Write-Host "    WARNING: Dual scan can cause unexpected update behavior. Feature/quality" -ForegroundColor Yellow
         Write-Host "    updates may bypass WSUS and come directly from Microsoft Update." -ForegroundColor Yellow
+        Write-Host "    Consider setting SetPolicyDrivenUpdateSourceFor* to resolve." -ForegroundColor Yellow
+    }
+
+    # --- Policy-Driven Update Source ---
+    $srcNames = @(
+        @{ Label = 'Feature Updates';  Value = $Policies.SourceFeatureUpdates }
+        @{ Label = 'Quality Updates';  Value = $Policies.SourceQualityUpdates }
+        @{ Label = 'Driver Updates';   Value = $Policies.SourceDriverUpdates }
+        @{ Label = 'Other Updates';    Value = $Policies.SourceOtherUpdates }
+    )
+    $anySrcSet = ($srcNames | Where-Object { $null -ne $_.Value }).Count -gt 0
+    if ($anySrcSet) {
+        Write-Section "Policy-Driven Update Source"
+        foreach ($src in $srcNames) {
+            if ($null -ne $src.Value) {
+                $srcLabel = if ($src.Value -eq 0) { 'Windows Update (WUfB)' } elseif ($src.Value -eq 1) { 'WSUS' } else { "Unknown ($($src.Value))" }
+                $srcColor = if ($src.Value -eq 0) { 'Green' } else { 'Yellow' }
+                Write-ReportLine "  $($src.Label)" $srcLabel $srcColor
+            }
+            else {
+                Write-ReportLine "  $($src.Label)" "(not configured)" 'DarkGray'
+            }
+        }
     }
 
     # --- Deferral Policies ---
@@ -712,6 +851,56 @@ function Show-UpdateReport {
     }
     else {
         Write-ReportLine "Quality Update Deferral" "Not configured (0 days)" 'DarkGray'
+    }
+
+    # --- Compliance Deadlines ---
+    $anyDeadline = ($null -ne $Policies.DeadlineFeatureDays -or $null -ne $Policies.DeadlineQualityDays)
+    if ($anyDeadline) {
+        Write-Section "Compliance Deadlines"
+        if ($null -ne $Policies.DeadlineFeatureDays) {
+            Write-ReportLine "Feature Deadline" "$($Policies.DeadlineFeatureDays) days" 'White'
+        }
+        else {
+            Write-ReportLine "Feature Deadline" "(not configured)" 'DarkGray'
+        }
+        if ($null -ne $Policies.DeadlineQualityDays) {
+            Write-ReportLine "Quality Deadline" "$($Policies.DeadlineQualityDays) days" 'White'
+        }
+        else {
+            Write-ReportLine "Quality Deadline" "(not configured)" 'DarkGray'
+        }
+        if ($null -ne $Policies.DeadlineGracePeriod) {
+            Write-ReportLine "Grace Period" "$($Policies.DeadlineGracePeriod) days" 'White'
+        }
+        if ($null -ne $Policies.DeadlineGracePeriodFU) {
+            Write-ReportLine "Grace Period (Feature)" "$($Policies.DeadlineGracePeriodFU) days" 'White'
+        }
+    }
+
+    # --- Channel / Preview Builds ---
+    $anyChannel = ($null -ne $Policies.BranchReadinessLevel -or $null -ne $Policies.ManagePreviewBuilds)
+    if ($anyChannel) {
+        Write-Section "Channel / Preview Builds"
+        if ($null -ne $Policies.BranchReadinessLevel) {
+            $branchDesc = switch ([int]$Policies.BranchReadinessLevel) {
+                2   { 'Windows Insider - Fast' }
+                4   { 'Windows Insider - Slow' }
+                8   { 'Release Preview' }
+                16  { 'Semi-Annual Channel' }
+                32  { 'General Availability Channel' }
+                default { "Unknown ($($Policies.BranchReadinessLevel))" }
+            }
+            Write-ReportLine "Channel" $branchDesc 'White'
+        }
+        if ($null -ne $Policies.ManagePreviewBuilds) {
+            $previewDesc = switch ([int]$Policies.ManagePreviewBuilds) {
+                0 { 'Disabled (no preview builds)' }
+                1 { 'Disabled (no preview builds)' }
+                2 { 'Enabled (preview builds allowed)' }
+                default { "Unknown ($($Policies.ManagePreviewBuilds))" }
+            }
+            Write-ReportLine "Preview Builds" $previewDesc 'White'
+        }
     }
 
     # --- Auto-Update Behavior ---
@@ -1402,6 +1591,23 @@ function Get-WSUSCleanupItems {
     return $items
 }
 
+function Get-WUfBCleanupItems {
+    $items = @()
+    $wufbValues = @('DeferFeatureUpdatesPeriodInDays', 'DeferQualityUpdatesPeriodInDays',
+                    'SetPolicyDrivenUpdateSourceForFeatureUpdates', 'SetPolicyDrivenUpdateSourceForQualityUpdates',
+                    'SetPolicyDrivenUpdateSourceForDriverUpdates', 'SetPolicyDrivenUpdateSourceForOtherUpdates',
+                    'ConfigureDeadlineForFeatureUpdates', 'ConfigureDeadlineForQualityUpdates',
+                    'ConfigureDeadlineGracePeriod', 'ConfigureDeadlineGracePeriodForFeatureUpdates',
+                    'BranchReadinessLevel', 'ManagePreviewBuilds')
+    foreach ($v in $wufbValues) {
+        $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
+        if ($null -ne $current) {
+            $items += @{ Path = $script:RegPath_WU; Name = $v }
+        }
+    }
+    return $items
+}
+
 function Get-GPOCleanupItems {
     $items = @()
     if (Test-Path $script:RegPath_WU) {
@@ -1516,12 +1722,49 @@ function Switch-ToWUfB {
         return
     }
 
+    # Compliance deadlines (optional)
+    Write-Host ""
+    $deadlineChoice = Read-Host "  Configure compliance deadlines? (Y/N, default: N)"
+    $deadlineFeature = $null
+    $deadlineQuality = $null
+    $deadlineGrace = $null
+    if ($deadlineChoice -eq 'Y' -or $deadlineChoice -eq 'y') {
+        Write-Host ""
+        Write-Host "  Compliance deadlines force install after deferral + deadline period." -ForegroundColor Gray
+        $dlFeatureInput = Read-Host "  Feature update deadline days (0-30, default: 7)"
+        if ([string]::IsNullOrWhiteSpace($dlFeatureInput)) { $deadlineFeature = 7 }
+        else { $deadlineFeature = [int]$dlFeatureInput }
+
+        $dlQualityInput = Read-Host "  Quality update deadline days (0-30, default: 3)"
+        if ([string]::IsNullOrWhiteSpace($dlQualityInput)) { $deadlineQuality = 3 }
+        else { $deadlineQuality = [int]$dlQualityInput }
+
+        $dlGraceInput = Read-Host "  Grace period days (0-7, default: 2)"
+        if ([string]::IsNullOrWhiteSpace($dlGraceInput)) { $deadlineGrace = 2 }
+        else { $deadlineGrace = [int]$dlGraceInput }
+    }
+
     # Build the set list
     $toSet = @()
+
+    # PolicyDrivenSource keys — explicitly direct updates to Windows Update (value 0)
+    # These are the most definitive WUfB signal on Windows 10 2004+ / Windows 11
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForFeatureUpdates'; Value = 0; Type = 'DWord' }
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForQualityUpdates'; Value = 0; Type = 'DWord' }
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForDriverUpdates'; Value = 0; Type = 'DWord' }
+    $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForOtherUpdates'; Value = 0; Type = 'DWord' }
+
     $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferFeatureUpdatesPeriodInDays'; Value = $featureDays; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferQualityUpdatesPeriodInDays'; Value = $qualityDays; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate'; Value = 0; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_AU; Name = 'AUOptions'; Value = $auOption; Type = 'DWord' }
+
+    # Compliance deadlines
+    if ($null -ne $deadlineFeature) {
+        $toSet += @{ Path = $script:RegPath_WU; Name = 'ConfigureDeadlineForFeatureUpdates'; Value = $deadlineFeature; Type = 'DWord' }
+        $toSet += @{ Path = $script:RegPath_WU; Name = 'ConfigureDeadlineForQualityUpdates'; Value = $deadlineQuality; Type = 'DWord' }
+        $toSet += @{ Path = $script:RegPath_WU; Name = 'ConfigureDeadlineGracePeriod'; Value = $deadlineGrace; Type = 'DWord' }
+    }
 
     if ($null -ne $pinVersion) {
         $toSet += @{ Path = $script:RegPath_WU; Name = 'TargetReleaseVersion'; Value = 1; Type = 'DWord' }
@@ -1594,15 +1837,9 @@ function Switch-ToWSUS {
     $statusServer = Read-Host "  WSUS Status Server URL (blank = same as WSUS server)"
     if ([string]::IsNullOrWhiteSpace($statusServer)) { $statusServer = $wuServer }
 
-    # Collect deferral values to remove (avoid dual-scan)
+    # Collect WUfB values to remove (avoid dual-scan)
     $toRemove = @()
-    $deferralValues = @('DeferFeatureUpdatesPeriodInDays', 'DeferQualityUpdatesPeriodInDays')
-    foreach ($v in $deferralValues) {
-        $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
-        if ($null -ne $current) {
-            $toRemove += @{ Path = $script:RegPath_WU; Name = $v }
-        }
-    }
+    $toRemove += Get-WUfBCleanupItems
     $toRemove += Get-PauseCleanupItems
 
     $toSet = @()
