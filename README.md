@@ -57,9 +57,9 @@ The `-Report` switch suppresses all interactive output and returns a single `PSC
 
 Checks whether the device is managed by WUfB. Returns:
 - **Exit 0** — WUfB compliant (device is receiving updates via WUfB)
-- **Exit 1** — Non-compliant (WSUS, SCCM, no policy, or dual-scan misconfiguration)
+- **Exit 1** — Non-compliant (WSUS, SCCM, auto-updates disabled, no policy, or dual-scan misconfiguration)
 
-Checks all WUfB indicators: PolicyDrivenSource keys, deferral policies, version targeting, compliance deadlines, channel settings, and driver exclusion. Handles split-source configurations (WSUS + PolicyDrivenSource override) as compliant.
+Checks all WUfB indicators: PolicyDrivenSource keys, deferral policies, version targeting, compliance deadlines, channel settings, and driver exclusion. Also detects blockers like `NoAutoUpdate=1` that prevent WUfB from functioning. Handles split-source configurations (WSUS + PolicyDrivenSource override) as compliant.
 
 ### Remediation Script (`WUDUP-Remediate.ps1`)
 
@@ -69,8 +69,9 @@ Runs when detection reports non-compliant. Removes blockers so the device falls 
 2. Removes WSUS configuration (WUServer, UseWUServer, etc.)
 3. Sets PolicyDrivenSource keys to direct all update types to Windows Update
 4. Sets `UseUpdateClassPolicySource=1` (required for direct registry writes)
-5. Cleans stale pause entries
-6. Triggers `usoclient StartScan` for immediate policy pickup
+5. Removes `NoAutoUpdate=1` if set (re-enables automatic updates)
+6. Cleans stale pause entries
+7. Triggers `usoclient StartScan` for immediate policy pickup
 
 The script intentionally does **not** set update policies (deferrals, deadlines, version pins, etc.). Those should come from your Intune WUfB Update Ring assignment, which will apply automatically once the blockers are removed.
 

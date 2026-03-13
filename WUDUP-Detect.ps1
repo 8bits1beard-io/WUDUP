@@ -25,7 +25,7 @@
 
 .NOTES
     Author:  Joshua Walderbach
-    Tool:    WUDUP Detection v1.2.0
+    Tool:    WUDUP Detection v1.3.0
     Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
@@ -151,13 +151,17 @@ try {
     $excludeDrivers = Get-PolicyValue -Name 'ExcludeWUDriversInQualityUpdate'
     if ($null -ne $excludeDrivers) { $indicators += "ExcludeDrivers: $excludeDrivers" }
 
-    # --- 7. WSUS Configuration ---
+    # --- 7. Auto-Update Disabled Check ---
+    $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
+    $hasAutoUpdateDisabled = ($noAutoUpdate -eq 1)
+
+    # --- 8. WSUS Configuration ---
     $wuServer       = Get-SafeRegistryValue -Path $RegPath_WU -Name 'WUServer'
     $wuStatusServer = Get-SafeRegistryValue -Path $RegPath_WU -Name 'WUStatusServer'
     $useWUServer    = Get-SafeRegistryValue -Path $RegPath_AU -Name 'UseWUServer'
     $hasWSUS        = ($useWUServer -eq 1 -and $null -ne $wuServer)
 
-    # --- 8. SCCM Detection ---
+    # --- 9. SCCM Detection ---
     $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
     $hasSCCM     = ($null -ne $sccmService -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'))
 
@@ -170,6 +174,14 @@ try {
     # Split-source: WSUS is configured but PolicyDrivenSource directs some update types to WU
     $anyPolicyDrivenToWU = ($featureFromWU -or $qualityFromWU -or $driverFromWU -or $otherFromWU)
     $isSplitSource = ($hasWSUS -and $anyPolicyDrivenToWU)
+
+    # NoAutoUpdate=1 disables updates entirely — non-compliant regardless of other indicators
+    if ($hasAutoUpdateDisabled) {
+        $msg = "NON-COMPLIANT: Automatic updates are disabled (NoAutoUpdate=1). WUfB policies cannot take effect."
+        Write-Log $msg
+        Write-Output $msg
+        exit 1
+    }
 
     if ($hasWUfBIndicators -and (-not $hasWSUS -or $isSplitSource)) {
         # WUfB is managing updates (either exclusively or via split-source)

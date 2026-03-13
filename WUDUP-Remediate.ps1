@@ -15,8 +15,9 @@
     1. Checks for SCCM — warns and exits if WU workload is not shifted
     2. Removes WSUS configuration (WUServer, WUStatusServer, UseWUServer, etc.)
     3. Sets PolicyDrivenUpdateSource keys to direct all updates to Windows Update
-    4. Cleans stale pause entries
-    5. Triggers policy scan for immediate pickup
+    4. Removes NoAutoUpdate if set (re-enables automatic updates)
+    5. Cleans stale pause entries
+    6. Triggers policy scan for immediate pickup
 
     Exit 0 = Remediation succeeded
     Exit 1 = Remediation failed
@@ -155,7 +156,14 @@ try {
     Set-RegDWord -Path $RegPath_AU -Name 'UseUpdateClassPolicySource' -Value 1
     $changes += 'Set PolicyDrivenUpdateSource (all types -> WU)'
 
-    # --- Step 3: Clean up stale pause entries ---
+    # --- Step 3: Remove NoAutoUpdate if set ---
+    $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
+    if ($noAutoUpdate -eq 1) {
+        Remove-RegValue -Path $RegPath_AU -Name 'NoAutoUpdate'
+        $changes += 'Removed NoAutoUpdate=1'
+    }
+
+    # --- Step 4: Clean up stale pause entries ---
     $pauseValues = @(
         'PauseFeatureUpdates', 'PauseFeatureUpdatesStartTime', 'PauseFeatureUpdatesEndTime',
         'PauseQualityUpdates', 'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime'
@@ -164,7 +172,7 @@ try {
         Remove-RegValue -Path $RegPath_WU -Name $v
     }
 
-    # --- Step 4: Trigger scan to pick up new policies ---
+    # --- Step 5: Trigger scan to pick up new policies ---
     try {
         Start-Process -FilePath 'usoclient' -ArgumentList 'StartScan' -NoNewWindow -Wait -ErrorAction Stop
         $changes += 'Triggered policy scan'
