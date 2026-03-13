@@ -7,7 +7,42 @@ Intune Proactive Remediation script pair for ensuring devices are managed by Win
 
 Both scripts run as SYSTEM, are non-interactive, and log to `%ProgramData%\WUDUP\Logs\`.
 
-## Detection Logic
+## Detection Flow
+
+```mermaid
+flowchart TD
+    Start([Detection starts]) --> NoAU{NoAutoUpdate = 1?}
+
+    NoAU -- Yes --> NC_Disabled[/"NON-COMPLIANT\nUpdates disabled"/]
+    NoAU -- No --> Collect[Collect WUfB indicators]
+
+    Collect --> HasWSUS{WSUS configured?}
+
+    HasWSUS -- No --> HasSCCM{SCCM detected?}
+    HasWSUS -- Yes --> WSUSIndicators{WUfB indicators\npresent?}
+
+    WSUSIndicators -- No --> NC_WSUS[/"NON-COMPLIANT\nWSUS managed"/]
+    WSUSIndicators -- Yes --> PolicyDriven{PolicyDrivenSource\ndirects to WU?}
+
+    PolicyDriven -- Yes --> C_Split([COMPLIANT\nsplit-source])
+    PolicyDriven -- No --> NC_Dual[/"NON-COMPLIANT\ndual-scan risk"/]
+
+    HasSCCM -- Yes --> NC_SCCM[/"NON-COMPLIANT\nSCCM managed"/]
+    HasSCCM -- No --> HasIndicators{WUfB indicators\npresent?}
+
+    HasIndicators -- Yes --> C_WUfB([COMPLIANT\nWUfB managed])
+    HasIndicators -- No --> NC_None[/"NON-COMPLIANT\nno policy"/]
+
+    style C_WUfB fill:#2d6a2d,color:#fff
+    style C_Split fill:#2d6a2d,color:#fff
+    style NC_Disabled fill:#8b1a1a,color:#fff
+    style NC_WSUS fill:#8b1a1a,color:#fff
+    style NC_Dual fill:#8b1a1a,color:#fff
+    style NC_SCCM fill:#8b1a1a,color:#fff
+    style NC_None fill:#8b1a1a,color:#fff
+```
+
+## Detection Details
 
 ### 1. Blocker Checks (checked first, immediate non-compliant)
 
