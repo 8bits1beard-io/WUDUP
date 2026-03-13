@@ -225,7 +225,7 @@ Historical results and pending reboot flag from the WU agent.
 
 | Value Name | Type | Description |
 |---|---|---|
-| `DODownloadMode` | DWORD | `0`=HTTP only, `1`=LAN peers, `2`=Group (AD site), `3`=Internet, `99`=Simple (no peering + no fallback), `100`=Bypass (BITS only). |
+| `DownloadMode` | DWORD | `0`=HTTP only, `1`=LAN peers, `2`=Group (AD site), `3`=Internet, `99`=Simple (no peering + no fallback), `100`=Bypass (BITS only). Note: the GP registry value is `DownloadMode`, not `DODownloadMode` (which is the CSP/MDM name). |
 
 ### Delivery Optimization (MDM)
 
