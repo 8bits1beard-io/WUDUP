@@ -93,6 +93,18 @@ function Set-RegString {
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType String -Force | Out-Null
 }
 
+function Write-Log {
+    param([string]$Message)
+    try {
+        $logDir = Join-Path $env:ProgramData 'WUDUP\Logs'
+        if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+        $logFile = Join-Path $logDir 'remediate.log'
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -Path $logFile -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+
 function Remove-RegValue {
     param([string]$Path, [string]$Name)
     if (Test-Path $Path) {
@@ -105,6 +117,7 @@ function Remove-RegValue {
 # ============================================================================
 
 try {
+    Write-Log "Remediation started"
     $changes = @()
 
     # --- Step 0: SCCM guard ---
@@ -117,7 +130,9 @@ try {
         $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
 
         if (-not $wuShiftedToIntune -and -not $Config_AllowOnSCCM) {
-            Write-Output "SKIPPED: SCCM/ConfigMgr manages WU workload. Local changes will be overwritten. Set Config_AllowOnSCCM=true to override."
+            $msg = "SKIPPED: SCCM/ConfigMgr manages WU workload. Local changes will be overwritten. Set Config_AllowOnSCCM=true to override."
+            Write-Log $msg
+            Write-Output $msg
             exit 1
         }
 
@@ -216,12 +231,26 @@ try {
         Remove-RegValue -Path $RegPath_WU -Name $v
     }
 
+    # --- Step 9: Trigger scan to pick up new policies ---
+    try {
+        Start-Process -FilePath 'usoclient' -ArgumentList 'StartScan' -NoNewWindow -Wait -ErrorAction Stop
+        $changes += 'Triggered policy scan'
+    }
+    catch {
+        # Non-fatal: scan will happen on next cycle
+        $changes += 'Scan trigger skipped (UsoClient unavailable)'
+    }
+
     # --- Done ---
     $summary = $changes -join '; '
-    Write-Output "REMEDIATED: WUfB configured. $summary"
+    $msg = "REMEDIATED: WUfB configured. $summary"
+    Write-Log $msg
+    Write-Output $msg
     exit 0
 }
 catch {
-    Write-Output "ERROR: Remediation failed - $($_.Exception.Message)"
+    $msg = "ERROR: Remediation failed - $($_.Exception.Message)"
+    Write-Log $msg
+    Write-Output $msg
     exit 1
 }

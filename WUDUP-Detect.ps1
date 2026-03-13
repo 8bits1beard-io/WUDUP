@@ -53,6 +53,18 @@ function Get-SafeRegistryValue {
     return $null
 }
 
+function Write-Log {
+    param([string]$Message)
+    try {
+        $logDir = Join-Path $env:ProgramData 'WUDUP\Logs'
+        if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+        $logFile = Join-Path $logDir 'detect.log'
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -Path $logFile -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+
 # Reads a value from GP path first, then MDM path as fallback
 function Get-PolicyValue {
     param([string]$Name)
@@ -66,6 +78,7 @@ function Get-PolicyValue {
 # ============================================================================
 
 try {
+    Write-Log "Detection started"
     $indicators = @()
 
     # --- 1. Policy-Driven Update Source (most definitive, Windows 10 2004+) ---
@@ -161,33 +174,39 @@ try {
         # WUfB is managing updates (either exclusively or via split-source)
         $detail = $indicators -join '; '
         if ($isSplitSource) {
-            Write-Output "COMPLIANT: WUfB detected (split-source with WSUS at $wuServer). $detail"
+            $msg = "COMPLIANT: WUfB detected (split-source with WSUS at $wuServer). $detail"
         }
         else {
-            Write-Output "COMPLIANT: WUfB detected. $detail"
+            $msg = "COMPLIANT: WUfB detected. $detail"
         }
+        Write-Log $msg
+        Write-Output $msg
         exit 0
     }
 
     # Not WUfB — report why
     if ($hasWSUS -and $hasWUfBIndicators) {
         # WSUS active with WUfB indicators but no PolicyDrivenSource override — dual-scan risk
-        Write-Output "NON-COMPLIANT: Dual-scan state (WSUS at $wuServer + WUfB policies). No PolicyDrivenSource override."
+        $msg = "NON-COMPLIANT: Dual-scan state (WSUS at $wuServer + WUfB policies). No PolicyDrivenSource override."
     }
     elseif ($hasWSUS) {
         $wsusDetail = $wuServer
         if ($null -ne $wuStatusServer) { $wsusDetail += ", Status: $wuStatusServer" }
-        Write-Output "NON-COMPLIANT: Device is using WSUS ($wsusDetail), no WUfB policies detected."
+        $msg = "NON-COMPLIANT: Device is using WSUS ($wsusDetail), no WUfB policies detected."
     }
     elseif ($hasSCCM) {
-        Write-Output "NON-COMPLIANT: Device is managed by SCCM/ConfigMgr. No WUfB policies detected."
+        $msg = "NON-COMPLIANT: Device is managed by SCCM/ConfigMgr. No WUfB policies detected."
     }
     else {
-        Write-Output "NON-COMPLIANT: No WUfB policies detected. Device using default Windows Update."
+        $msg = "NON-COMPLIANT: No WUfB policies detected. Device using default Windows Update."
     }
+    Write-Log $msg
+    Write-Output $msg
     exit 1
 }
 catch {
-    Write-Output "ERROR: Detection failed - $($_.Exception.Message)"
+    $msg = "ERROR: Detection failed - $($_.Exception.Message)"
+    Write-Log $msg
+    Write-Output $msg
     exit 1
 }

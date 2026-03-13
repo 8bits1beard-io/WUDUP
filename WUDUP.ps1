@@ -17,6 +17,10 @@
     Requires: Windows 10 or Windows 11, Administrator for modifications
 #>
 
+param(
+    [switch]$Report
+)
+
 # ============================================================================
 #  REGISTRY PATH CONSTANTS
 # ============================================================================
@@ -168,6 +172,48 @@ function Get-UpdateStatus {
         LastInstallTime     = $lastInstall
         LastDetectTime      = $lastDetect
     }
+}
+
+function Get-RecentUpdateHistory {
+    param([int]$Count = 10)
+    $history = @()
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session
+        $searcher = $session.CreateUpdateSearcher()
+        $total = $searcher.GetTotalHistoryCount()
+        if ($total -gt 0) {
+            $limit = [Math]::Min($Count, $total)
+            $entries = $searcher.QueryHistory(0, $limit)
+            foreach ($entry in $entries) {
+                $history += [PSCustomObject]@{
+                    Date      = $entry.Date
+                    Title     = $entry.Title
+                    Operation = switch ($entry.Operation) { 1 { 'Install' } 2 { 'Uninstall' } default { 'Unknown' } }
+                    Result    = switch ($entry.ResultCode) { 0 { 'Not Started' } 1 { 'In Progress' } 2 { 'Succeeded' } 3 { 'Succeeded (Errors)' } 4 { 'Failed' } 5 { 'Aborted' } default { 'Unknown' } }
+                }
+            }
+        }
+    }
+    catch { }
+    return $history
+}
+
+function Get-RegisteredUpdateServices {
+    $services = @()
+    try {
+        $sm = New-Object -ComObject Microsoft.Update.ServiceManager
+        foreach ($svc in $sm.Services) {
+            $services += [PSCustomObject]@{
+                Name              = $svc.Name
+                ServiceID         = $svc.ServiceID
+                IsDefaultAUService = $svc.IsDefaultAUService
+                IsManaged         = $svc.IsManaged
+                ServiceUrl        = $svc.ServiceUrl
+            }
+        }
+    }
+    catch { }
+    return $services
 }
 
 function Ensure-RegistryPath {
@@ -731,7 +777,9 @@ function Show-UpdateReport {
         [Parameter(Mandatory)]
         [PSCustomObject]$ServiceState,
         [Parameter(Mandatory)]
-        [PSCustomObject]$UpdateStatus
+        [PSCustomObject]$UpdateStatus,
+        [array]$UpdateHistory = @(),
+        [array]$UpdateServices = @()
     )
 
     $divider = "  " + ("=" * 72)
@@ -1154,6 +1202,39 @@ function Show-UpdateReport {
     }
     else {
         Write-ReportLine "Download Mode" "Default (OS-managed)" 'DarkGray'
+    }
+
+    # --- Recent Update History ---
+    if ($UpdateHistory.Count -gt 0) {
+        Write-Section "Recent Update History"
+        foreach ($entry in $UpdateHistory) {
+            $dateStr = if ($entry.Date) { $entry.Date.ToString('yyyy-MM-dd HH:mm') } else { '(unknown)' }
+            $resultColor = switch ($entry.Result) {
+                'Succeeded' { 'Green' }
+                'Failed' { 'Red' }
+                'Aborted' { 'Red' }
+                'In Progress' { 'Yellow' }
+                default { 'White' }
+            }
+            $label = "$dateStr  $($entry.Operation)"
+            Write-ReportLine $label $entry.Title $resultColor
+            # Show result on a separate line if not succeeded
+            if ($entry.Result -ne 'Succeeded') {
+                Write-ReportLine "  Result" $entry.Result $resultColor
+            }
+        }
+    }
+
+    # --- Registered Update Services (Runtime) ---
+    if ($UpdateServices.Count -gt 0) {
+        Write-Section "Registered Update Services (Runtime)"
+        foreach ($svc in $UpdateServices) {
+            $svcColor = if ($svc.IsDefaultAUService) { 'Green' } else { 'DarkGray' }
+            $label = $svc.Name
+            if ($svc.IsDefaultAUService) { $label += ' [DEFAULT]' }
+            $detail = if ($svc.ServiceUrl) { $svc.ServiceUrl } else { '(no URL - built-in)' }
+            Write-ReportLine "  $label" $detail $svcColor
+        }
     }
 
     Write-Host ""
@@ -2175,12 +2256,14 @@ function Show-ModificationMenu {
             'R' { Restore-WUSettings }
             'r' { Restore-WUSettings }
             '8' {
-                $osInfo       = Get-OSInfo
-                $authority    = Get-ManagementAuthority
-                $policies     = Get-UpdatePolicies
-                $serviceState = Get-WUServiceState
-                $updateStatus = Get-UpdateStatus
-                Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies -ServiceState $serviceState -UpdateStatus $updateStatus
+                $osInfo         = Get-OSInfo
+                $authority      = Get-ManagementAuthority
+                $policies       = Get-UpdatePolicies
+                $serviceState   = Get-WUServiceState
+                $updateStatus   = Get-UpdateStatus
+                $updateHistory  = Get-RecentUpdateHistory
+                $updateServices = Get-RegisteredUpdateServices
+                Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies -ServiceState $serviceState -UpdateStatus $updateStatus -UpdateHistory $updateHistory -UpdateServices $updateServices
             }
             '0' { }
             default {
@@ -2196,16 +2279,36 @@ function Show-ModificationMenu {
 
 $isAdmin = Test-IsAdmin
 
-Write-Host ""
-Write-Host "  Collecting Windows Update configuration..." -ForegroundColor Cyan
+if (-not $Report) {
+    Write-Host ""
+    Write-Host "  Collecting Windows Update configuration..." -ForegroundColor Cyan
+}
 
-$osInfo       = Get-OSInfo
-$authority    = Get-ManagementAuthority
-$policies     = Get-UpdatePolicies
-$serviceState = Get-WUServiceState
-$updateStatus = Get-UpdateStatus
+$osInfo         = Get-OSInfo
+$authority      = Get-ManagementAuthority
+$policies       = Get-UpdatePolicies
+$serviceState   = Get-WUServiceState
+$updateStatus   = Get-UpdateStatus
+$updateHistory  = Get-RecentUpdateHistory
+$updateServices = Get-RegisteredUpdateServices
 
-Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies -ServiceState $serviceState -UpdateStatus $updateStatus
+if ($Report) {
+    # Structured output for automation
+    [PSCustomObject]@{
+        ComputerName       = $env:COMPUTERNAME
+        Timestamp          = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        OSInfo             = $osInfo
+        ManagementAuthority = $authority
+        Policies           = $policies
+        ServiceState       = $serviceState
+        UpdateStatus       = $updateStatus
+        UpdateHistory      = $updateHistory
+        RegisteredServices = $updateServices
+    }
+    exit 0
+}
+
+Show-UpdateReport -OSInfo $osInfo -Authority $authority -Policies $policies -ServiceState $serviceState -UpdateStatus $updateStatus -UpdateHistory $updateHistory -UpdateServices $updateServices
 
 if ($isAdmin) {
     Write-Host "  Running as Administrator - modification options available." -ForegroundColor Green
