@@ -299,6 +299,7 @@ function Get-ManagementAuthority {
         IsSplitSource = $false
         CanModify     = $true
         MDMProvider   = $null
+        AutoUpdateDisabled = $false
     }
 
     # Check SCCM/ConfigMgr
@@ -400,20 +401,33 @@ function Get-ManagementAuthority {
         $wufbIndicators += 'QualityDeferral'
     }
 
-    # Version targeting
+    # Version targeting — requires both TargetReleaseVersion=1 AND TargetReleaseVersionInfo
     $targetVer = $gpValues['TargetReleaseVersion']
     if ($null -eq $targetVer) { $targetVer = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersion' }
-    if ($targetVer -eq 1) { $wufbIndicators += 'VersionTargeting' }
+    $targetVerInfo = $gpValues['TargetReleaseVersionInfo']
+    if ($null -eq $targetVerInfo) { $targetVerInfo = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersionInfo' }
+    if ($targetVer -eq 1 -and $null -ne $targetVerInfo) { $wufbIndicators += 'VersionTargeting' }
 
-    # Compliance deadlines
-    if ($null -ne $gpValues['ConfigureDeadlineForFeatureUpdates'] -or
-        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates')) {
-        $wufbIndicators += 'FeatureDeadline'
-    }
-    if ($null -ne $gpValues['ConfigureDeadlineForQualityUpdates'] -or
-        $null -ne (Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForQualityUpdates')) {
-        $wufbIndicators += 'QualityDeadline'
-    }
+    # Compliance deadlines — check both Configure* (MDM) and Compliance* (GP) naming conventions
+    $dlFeature = $gpValues['ConfigureDeadlineForFeatureUpdates']
+    if ($null -eq $dlFeature) { $dlFeature = $gpValues['ComplianceDeadlineForFU'] }
+    if ($null -eq $dlFeature) { $dlFeature = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates' }
+    if ($null -ne $dlFeature) { $wufbIndicators += 'FeatureDeadline' }
+
+    $dlQuality = $gpValues['ConfigureDeadlineForQualityUpdates']
+    if ($null -eq $dlQuality) { $dlQuality = $gpValues['ComplianceDeadline'] }
+    if ($null -eq $dlQuality) { $dlQuality = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForQualityUpdates' }
+    if ($null -ne $dlQuality) { $wufbIndicators += 'QualityDeadline' }
+
+    $dlGrace = $gpValues['ConfigureDeadlineGracePeriod']
+    if ($null -eq $dlGrace) { $dlGrace = $gpValues['ComplianceGracePeriod'] }
+    if ($null -eq $dlGrace) { $dlGrace = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineGracePeriod' }
+    if ($null -ne $dlGrace) { $wufbIndicators += 'GracePeriod' }
+
+    $dlGraceFU = $gpValues['ConfigureDeadlineGracePeriodForFeatureUpdates']
+    if ($null -eq $dlGraceFU) { $dlGraceFU = $gpValues['ComplianceGracePeriodForFU'] }
+    if ($null -eq $dlGraceFU) { $dlGraceFU = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates' }
+    if ($null -ne $dlGraceFU) { $wufbIndicators += 'GracePeriodFU' }
 
     # Channel targeting and preview builds
     if ($null -ne $gpValues['BranchReadinessLevel'] -or
@@ -446,10 +460,22 @@ function Get-ManagementAuthority {
                                       $srcOther_GP -eq 0 -or $srcOther_MDM -eq 0))
     $result.IsSplitSource = $isSplitSource
 
+    # NoAutoUpdate=1 disables all updates — disqualifies WUfB regardless of indicators
+    $noAutoUpdate = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
+    $result.AutoUpdateDisabled = ($noAutoUpdate -eq 1)
+
     # Classify: GPO with WUfB indicators, GPO without, WSUS with split-source, or Local
     if ($result.Authority -eq 'Local' -or $result.Authority -eq 'MDM (stale?)') {
         $auValues = Get-AllRegistryValues -Path $script:RegPath_AU
-        if ($wufbIndicators.Count -gt 0 -and (-not $hasWSUS -or $isSplitSource)) {
+        if ($noAutoUpdate -eq 1) {
+            # Auto-updates disabled — WUfB can't function even if indicators exist
+            if (-not $result.IsSCCMManaged -and -not $result.IsMDMManaged) {
+                $result.Authority = 'Disabled (NoAutoUpdate)'
+                $result.Details = 'Automatic updates are disabled — WUfB policies cannot take effect'
+                $result.IsWUfB = $false
+            }
+        }
+        elseif ($wufbIndicators.Count -gt 0 -and (-not $hasWSUS -or $isSplitSource)) {
             if ($isSplitSource) {
                 $result.Authority = 'WUfB (split-source with WSUS)'
                 $result.Details = "WUfB controls updates via PolicyDrivenSource; WSUS also configured at $wuServer"
@@ -1774,6 +1800,9 @@ function Get-WUfBCleanupItems {
                     'SetPolicyDrivenUpdateSourceForDriverUpdates', 'SetPolicyDrivenUpdateSourceForOtherUpdates',
                     'ConfigureDeadlineForFeatureUpdates', 'ConfigureDeadlineForQualityUpdates',
                     'ConfigureDeadlineGracePeriod', 'ConfigureDeadlineGracePeriodForFeatureUpdates',
+                    'ComplianceDeadlineForFU', 'ComplianceDeadline',
+                    'ComplianceGracePeriod', 'ComplianceGracePeriodForFU',
+                    'TargetReleaseVersion', 'TargetReleaseVersionInfo', 'ProductVersion',
                     'BranchReadinessLevel', 'ManagePreviewBuilds',
                     'ExcludeWUDriversInQualityUpdate')
     foreach ($v in $wufbValues) {
@@ -1945,8 +1974,13 @@ function Switch-ToWUfB {
 
     $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferFeatureUpdatesPeriodInDays'; Value = $featureDays; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferQualityUpdatesPeriodInDays'; Value = $qualityDays; Type = 'DWord' }
-    $toSet += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate'; Value = 0; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_AU; Name = 'AUOptions'; Value = $auOption; Type = 'DWord' }
+
+    # Remove NoAutoUpdate if set (blocker for WUfB)
+    $noAutoUpdateCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
+    if ($noAutoUpdateCurrent -eq 1) {
+        $toRemove += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate' }
+    }
 
     # Compliance deadlines
     if ($null -ne $deadlineFeature) {
@@ -1992,6 +2026,12 @@ function Switch-ToWUfB {
                 New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType String -Force | Out-Null
             }
         }
+
+        # Trigger scan to pick up new policies
+        try {
+            Start-Process -FilePath 'usoclient' -ArgumentList 'StartScan' -NoNewWindow -Wait -ErrorAction Stop
+        }
+        catch { }
 
         Write-Host ""
         Write-Host "  SUCCESS: Switched to WUfB configuration." -ForegroundColor Green
@@ -2080,6 +2120,12 @@ function Switch-ToWSUS {
                 New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType String -Force | Out-Null
             }
         }
+
+        # Trigger scan to pick up new policies
+        try {
+            Start-Process -FilePath 'usoclient' -ArgumentList 'StartScan' -NoNewWindow -Wait -ErrorAction Stop
+        }
+        catch { }
 
         Write-Host ""
         Write-Host "  SUCCESS: Switched to WSUS ($wuServer)." -ForegroundColor Green

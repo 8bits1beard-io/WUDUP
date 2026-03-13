@@ -25,7 +25,7 @@
 
 .NOTES
     Author:  Joshua Walderbach
-    Tool:    WUDUP Detection v1.3.0
+    Tool:    WUDUP Detection v1.4.0
     Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
@@ -161,7 +161,10 @@ try {
     $useWUServer    = Get-SafeRegistryValue -Path $RegPath_AU -Name 'UseWUServer'
     $hasWSUS        = ($useWUServer -eq 1 -and $null -ne $wuServer)
 
-    # --- 9. SCCM Detection ---
+    # --- 9. Dual-Scan Suppression ---
+    $disableDualScan = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DisableDualScan'
+
+    # --- 10. SCCM Detection ---
     $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
     $hasSCCM     = ($null -ne $sccmService -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'))
 
@@ -198,9 +201,13 @@ try {
     }
 
     # Not WUfB — report why
-    if ($hasWSUS -and $hasWUfBIndicators) {
-        # WSUS active with WUfB indicators but no PolicyDrivenSource override — dual-scan risk
+    if ($hasWSUS -and $hasWUfBIndicators -and $disableDualScan -ne 1) {
+        # WSUS active with WUfB indicators but no PolicyDrivenSource override and dual-scan not suppressed
         $msg = "NON-COMPLIANT: Dual-scan state (WSUS at $wuServer + WUfB policies). No PolicyDrivenSource override."
+    }
+    elseif ($hasWSUS -and $hasWUfBIndicators -and $disableDualScan -eq 1) {
+        # WSUS active with WUfB indicators, but dual-scan is suppressed — still non-compliant but not dual-scan
+        $msg = "NON-COMPLIANT: WSUS at $wuServer with WUfB policies present. DisableDualScan=1 suppresses dual-scan but no PolicyDrivenSource override."
     }
     elseif ($hasWSUS) {
         $wsusDetail = $wuServer
