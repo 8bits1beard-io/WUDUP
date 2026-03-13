@@ -8,14 +8,14 @@ WUDUP (Windows Update Dashboard: Unified Provisioning) is a PowerShell-based too
 
 ## Scripts
 
-### WUDUP.ps1 (~2200 lines) — Interactive Dashboard + Modification Tool
+### WUDUP.ps1 (~2370 lines) — Interactive Dashboard + Modification Tool
 - Color-coded console dashboard showing all WU configuration
 - Interactive modification menu (admin only) for individual settings
 - Source switching workflow (WUfB / WSUS / Microsoft Update direct)
 - Backup/restore system (`%ProgramData%\WUDUP\Backups` as `.json` files)
 - Runs interactively with `Read-Host` prompts; uses `Write-Host` for display
 
-### ProactiveRemediation/WUDUP-Detect.ps1 (~220 lines) — Intune Proactive Remediation Detection
+### ProactiveRemediation/WUDUP-Detect.ps1 (~230 lines) — Intune Proactive Remediation Detection
 - Non-interactive, runs as SYSTEM
 - Uses `Write-Output` (not `Write-Host`) for Intune to capture
 - Exit 0 = WUfB compliant, Exit 1 = non-compliant (triggers remediation)
