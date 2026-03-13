@@ -39,11 +39,12 @@ $script:RegPath_CBS          = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\
 # ============================================================================
 
 $script:AUOptionsMap = @{
-    1 = 'Never check for updates (not recommended)'
+    1 = 'Disabled (AU is off)'
     2 = 'Notify before download'
     3 = 'Auto download, notify to install'
     4 = 'Auto download and schedule install'
-    5 = 'Allow local admin to choose'
+    5 = 'Allow local admin to choose (not valid on Windows 10+)'
+    7 = 'Notify for install and notify for restart (Server 2016+ only)'
 }
 
 $script:DODownloadModeMap = @{
@@ -125,13 +126,21 @@ function Test-ActiveMDMEnrollment {
 
 function Get-WUServiceState {
     $result = [PSCustomObject]@{
-        Status    = 'Unknown'
-        StartType = 'Unknown'
+        Status         = 'Unknown'
+        StartType      = 'Unknown'
+        UsoStatus      = 'Unknown'
+        UsoStartType   = 'Unknown'
     }
     try {
         $svc = Get-Service -Name 'wuauserv' -ErrorAction Stop
         $result.Status = $svc.Status.ToString()
         $result.StartType = $svc.StartType.ToString()
+    }
+    catch { }
+    try {
+        $uso = Get-Service -Name 'UsoSvc' -ErrorAction Stop
+        $result.UsoStatus = $uso.Status.ToString()
+        $result.UsoStartType = $uso.StartType.ToString()
     }
     catch { }
     return $result
@@ -458,10 +467,24 @@ function Get-UpdatePolicies {
     $srcOther   = if ($null -ne $srcOther_GP)   { $srcOther_GP }   elseif ($null -ne $srcOther_MDM)   { $srcOther_MDM }   else { $null }
 
     # --- Compliance Deadlines ---
+    # GP writes native names (ComplianceDeadlineForFU, ComplianceDeadline); MDM/CSP uses Configure* names
+    # ADMX-backed CSP also writes to GP path with native names. Check both at GP path.
     $deadlineFeature_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineForFeatureUpdates'
+    if ($null -eq $deadlineFeature_GP) {
+        $deadlineFeature_GP = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ComplianceDeadlineForFU'
+    }
     $deadlineQuality_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineForQualityUpdates'
+    if ($null -eq $deadlineQuality_GP) {
+        $deadlineQuality_GP = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ComplianceDeadline'
+    }
     $deadlineGrace_GP    = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineGracePeriod'
+    if ($null -eq $deadlineGrace_GP) {
+        $deadlineGrace_GP = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ComplianceGracePeriod'
+    }
     $deadlineGraceFU_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates'
+    if ($null -eq $deadlineGraceFU_GP) {
+        $deadlineGraceFU_GP = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ComplianceGracePeriodForFU'
+    }
     $deadlineFeature_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates'
     $deadlineQuality_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForQualityUpdates'
     $deadlineGrace_MDM   = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineGracePeriod'
@@ -536,6 +559,9 @@ function Get-UpdatePolicies {
     $pauseFeatureStatus = Get-SafeRegistryValue -Path $script:RegPath_Pause -Name 'PausedFeatureStatus'
     $pauseQualityStatus = Get-SafeRegistryValue -Path $script:RegPath_Pause -Name 'PausedQualityStatus'
 
+    # Consolidated pause expiry from Settings app
+    $pauseExpiryTime = Get-SafeRegistryValue -Path $script:RegPath_UX -Name 'PauseUpdatesExpiryTime'
+
     # --- Active Hours ---
     # Policy-enforced (AU path)
     $setActiveHoursGP = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'SetActiveHours'
@@ -569,9 +595,11 @@ function Get-UpdatePolicies {
     # --- Dual-Scan Detection ---
     # Dual-scan: WSUS active + WUfB deferrals, but NO PolicyDrivenSource override
     # If PolicyDrivenSource is set, it's a valid split-source config, not a dual-scan problem
+    # DisableDualScan=1 suppresses dual-scan (legacy, deprecated on Win 11, but still functional on Win 10)
     $hasPolicyDrivenSource = ($null -ne $srcFeature -or $null -ne $srcQuality)
+    $disableDualScan = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DisableDualScan'
     $dualScan = $false
-    if ($useWUServer -eq 1 -and ($null -ne $gpFeatureDefer -or $null -ne $gpQualityDefer) -and -not $hasPolicyDrivenSource) {
+    if ($useWUServer -eq 1 -and ($null -ne $gpFeatureDefer -or $null -ne $gpQualityDefer) -and -not $hasPolicyDrivenSource -and $disableDualScan -ne 1) {
         $dualScan = $true
     }
 
@@ -622,6 +650,7 @@ function Get-UpdatePolicies {
         PauseQualityDate         = $pauseQualityDate
         PauseFeatureStatus       = $pauseFeatureStatus
         PauseQualityStatus       = $pauseQualityStatus
+        PauseExpiryTime          = $pauseExpiryTime
         # Active Hours
         ActiveHoursStart         = $activeStart
         ActiveHoursEnd           = $activeEnd
@@ -757,11 +786,18 @@ function Show-UpdateReport {
     $svcColor = 'Green'
     if ($ServiceState.Status -eq 'Stopped') { $svcColor = 'Yellow' }
     if ($ServiceState.StartType -eq 'Disabled') { $svcColor = 'Red' }
-    Write-ReportLine "Service Status" $ServiceState.Status $svcColor
-    Write-ReportLine "Start Type" $ServiceState.StartType $svcColor
+    Write-ReportLine "WU Agent (wuauserv)" "$($ServiceState.Status) / $($ServiceState.StartType)" $svcColor
+    $usoColor = 'Green'
+    if ($ServiceState.UsoStatus -eq 'Stopped') { $usoColor = 'Yellow' }
+    if ($ServiceState.UsoStartType -eq 'Disabled') { $usoColor = 'Red' }
+    Write-ReportLine "Update Orchestrator (UsoSvc)" "$($ServiceState.UsoStatus) / $($ServiceState.UsoStartType)" $usoColor
     if ($ServiceState.StartType -eq 'Disabled') {
         Write-Host ""
         Write-Host "    WARNING: Windows Update service is disabled - no updates will be processed." -ForegroundColor Red
+    }
+    if ($ServiceState.UsoStartType -eq 'Disabled') {
+        Write-Host ""
+        Write-Host "    WARNING: Update Orchestrator is disabled - updates cannot be initiated." -ForegroundColor Red
     }
 
     # --- Update Status ---
@@ -1080,6 +1116,9 @@ function Show-UpdateReport {
     }
     else {
         Write-ReportLine "Quality Updates" "Not paused" 'Green'
+    }
+    if ($null -ne $Policies.PauseExpiryTime -and $Policies.PauseExpiryTime -ne '') {
+        Write-ReportLine "Pause Expiry" $Policies.PauseExpiryTime 'Yellow'
     }
 
     # --- Active Hours ---
@@ -1806,6 +1845,8 @@ function Switch-ToWUfB {
     $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForQualityUpdates'; Value = 0; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForDriverUpdates'; Value = 0; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForOtherUpdates'; Value = 0; Type = 'DWord' }
+    # Required for PolicyDrivenSource to take effect when set via direct registry write (not GPO/CSP)
+    $toSet += @{ Path = $script:RegPath_AU; Name = 'UseUpdateClassPolicySource'; Value = 1; Type = 'DWord' }
 
     $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferFeatureUpdatesPeriodInDays'; Value = $featureDays; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferQualityUpdatesPeriodInDays'; Value = $qualityDays; Type = 'DWord' }

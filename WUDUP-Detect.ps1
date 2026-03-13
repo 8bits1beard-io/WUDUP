@@ -103,10 +103,23 @@ try {
     }
 
     # --- 4. Compliance Deadlines ---
+    # GP writes native names (ComplianceDeadlineForFU, ComplianceDeadline); MDM uses Configure* names
     $deadlineFeature = Get-PolicyValue -Name 'ConfigureDeadlineForFeatureUpdates'
+    if ($null -eq $deadlineFeature) {
+        $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceDeadlineForFU'
+    }
     $deadlineQuality = Get-PolicyValue -Name 'ConfigureDeadlineForQualityUpdates'
+    if ($null -eq $deadlineQuality) {
+        $deadlineQuality = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceDeadline'
+    }
     $deadlineGrace   = Get-PolicyValue -Name 'ConfigureDeadlineGracePeriod'
+    if ($null -eq $deadlineGrace) {
+        $deadlineGrace = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceGracePeriod'
+    }
     $deadlineGraceFU = Get-PolicyValue -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates'
+    if ($null -eq $deadlineGraceFU) {
+        $deadlineGraceFU = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceGracePeriodForFU'
+    }
 
     if ($null -ne $deadlineFeature) { $indicators += "FeatureDeadline: ${deadlineFeature}d" }
     if ($null -ne $deadlineQuality) { $indicators += "QualityDeadline: ${deadlineQuality}d" }

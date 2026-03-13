@@ -157,6 +157,8 @@ try {
     foreach ($key in $sourceKeys) {
         Set-RegDWord -Path $RegPath_WU -Name $key -Value 0
     }
+    # Required for PolicyDrivenSource to take effect when set via direct registry write (not GPO/CSP)
+    Set-RegDWord -Path $RegPath_AU -Name 'UseUpdateClassPolicySource' -Value 1
     $changes += 'Set PolicyDrivenUpdateSource (all types -> WU)'
 
     # --- Step 3: Set deferral policies ---
