@@ -586,7 +586,7 @@ function Get-UpdatePolicies {
     $smartActiveHours = Get-SafeRegistryValue -Path $script:RegPath_UX -Name 'SmartActiveHoursState'
 
     # --- Delivery Optimization ---
-    $doGP  = Get-SafeRegistryValue -Path $script:RegPath_DO_Policy -Name 'DODownloadMode'
+    $doGP  = Get-SafeRegistryValue -Path $script:RegPath_DO_Policy -Name 'DownloadMode'
     $doMDM = Get-SafeRegistryValue -Path $script:RegPath_DO_MDM -Name 'DODownloadMode'
     if ($null -ne $doGP)       { $doMode = $doGP;  $doSource = 'Group Policy' }
     elseif ($null -ne $doMDM)  { $doMode = $doMDM; $doSource = 'MDM' }
@@ -966,6 +966,8 @@ function Show-UpdateReport {
                 8   { 'Release Preview' }
                 16  { 'Semi-Annual Channel' }
                 32  { 'General Availability Channel' }
+                64  { 'Release Preview (Quality Updates Only)' }
+                128 { 'Canary Channel' }
                 default { "Unknown ($($Policies.BranchReadinessLevel))" }
             }
             Write-ReportLine "Channel" $branchDesc 'White'
@@ -973,8 +975,9 @@ function Show-UpdateReport {
         if ($null -ne $Policies.ManagePreviewBuilds) {
             $previewDesc = switch ([int]$Policies.ManagePreviewBuilds) {
                 0 { 'Disabled (no preview builds)' }
-                1 { 'Disabled (no preview builds)' }
+                1 { 'Disabled once next release is public' }
                 2 { 'Enabled (preview builds allowed)' }
+                3 { 'User selection (default)' }
                 default { "Unknown ($($Policies.ManagePreviewBuilds))" }
             }
             Write-ReportLine "Preview Builds" $previewDesc 'White'
@@ -1240,12 +1243,12 @@ function Set-DeferralPolicy {
     Write-Host "  --- Set Update Deferral Periods ---" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Feature updates (major releases): 0-365 days" -ForegroundColor Gray
-    Write-Host "  Quality updates (security/cumulative): 0-35 days" -ForegroundColor Gray
+    Write-Host "  Quality updates (security/cumulative): 0-30 days" -ForegroundColor Gray
     Write-Host "  Microsoft recommends: Feature=30-90 days, Quality=3-7 days" -ForegroundColor Gray
     Write-Host ""
 
     $featureInput = Read-Host "  Feature update deferral days (0-365, blank to skip)"
-    $qualityInput = Read-Host "  Quality update deferral days (0-35, blank to skip)"
+    $qualityInput = Read-Host "  Quality update deferral days (0-30, blank to skip)"
 
     if ([string]::IsNullOrWhiteSpace($featureInput) -and [string]::IsNullOrWhiteSpace($qualityInput)) {
         Write-Host "  Cancelled - no values entered." -ForegroundColor Yellow
@@ -1267,8 +1270,8 @@ function Set-DeferralPolicy {
 
         if (-not [string]::IsNullOrWhiteSpace($qualityInput)) {
             $qualityDays = [int]$qualityInput
-            if ($qualityDays -lt 0 -or $qualityDays -gt 35) {
-                Write-Host "  ERROR: Quality deferral must be 0-35." -ForegroundColor Red
+            if ($qualityDays -lt 0 -or $qualityDays -gt 30) {
+                Write-Host "  ERROR: Quality deferral must be 0-30." -ForegroundColor Red
                 return
             }
             New-ItemProperty -Path $script:RegPath_WU -Name 'DeferQualityUpdatesPeriodInDays' -Value $qualityDays -PropertyType DWord -Force | Out-Null
@@ -1480,7 +1483,7 @@ function Backup-WUSettings {
         New-Item -Path $backupDir -ItemType Directory -Force | Out-Null
     }
 
-    $backupFile = Join-Path $backupDir "wudup_backup_${timestamp}_${Reason}.reg"
+    $backupFile = Join-Path $backupDir "wudup_backup_${timestamp}_${Reason}.json"
 
     $backup = [ordered]@{
         Timestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
@@ -1520,7 +1523,7 @@ function Restore-WUSettings {
         return
     }
 
-    $files = Get-ChildItem -Path $backupDir -Filter '*.reg' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    $files = Get-ChildItem -Path $backupDir -Filter '*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
     if ($files.Count -eq 0) {
         Write-Host "  No backups found." -ForegroundColor Yellow
         return
@@ -1662,8 +1665,8 @@ function Show-SourceChangePreview {
 
 function Get-WSUSCleanupItems {
     $items = @()
-    $wsusValues = @('WUServer', 'WUStatusServer', 'DoNotConnectToWindowsUpdateInternetLocations',
-                    'SetDisableUXWUAccess')
+    $wsusValues = @('WUServer', 'WUStatusServer', 'UpdateServiceUrlAlternate',
+                    'DoNotConnectToWindowsUpdateInternetLocations', 'SetDisableUXWUAccess')
     foreach ($v in $wsusValues) {
         $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
         if ($null -ne $current) {
@@ -1697,6 +1700,15 @@ function Get-WUfBCleanupItems {
             $items += @{ Path = $script:RegPath_WU; Name = $v }
         }
     }
+
+    $auValues = @('UseUpdateClassPolicySource')
+    foreach ($v in $auValues) {
+        $current = Get-SafeRegistryValue -Path $script:RegPath_AU -Name $v
+        if ($null -ne $current) {
+            $items += @{ Path = $script:RegPath_AU; Name = $v }
+        }
+    }
+
     return $items
 }
 
@@ -1724,7 +1736,8 @@ function Get-GPOCleanupItems {
 function Get-PauseCleanupItems {
     $items = @()
     $pauseValues = @('PauseFeatureUpdatesStartTime', 'PauseFeatureUpdatesEndTime',
-                     'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime')
+                     'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime',
+                     'PauseFeatureUpdates', 'PauseQualityUpdates')
     foreach ($v in $pauseValues) {
         $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
         if ($null -ne $current) {
@@ -1768,11 +1781,11 @@ function Switch-ToWUfB {
         return
     }
 
-    $qualityInput = Read-Host "  Quality update deferral days (0-35, default: 7)"
+    $qualityInput = Read-Host "  Quality update deferral days (0-30, default: 7)"
     if ([string]::IsNullOrWhiteSpace($qualityInput)) { $qualityDays = 7 }
     else { $qualityDays = [int]$qualityInput }
-    if ($qualityDays -lt 0 -or $qualityDays -gt 35) {
-        Write-Host "  ERROR: Quality deferral must be 0-35." -ForegroundColor Red
+    if ($qualityDays -lt 0 -or $qualityDays -gt 30) {
+        Write-Host "  ERROR: Quality deferral must be 0-30." -ForegroundColor Red
         return
     }
 

@@ -135,6 +135,7 @@ try {
         @{ Path = $RegPath_WU; Name = 'WUStatusServer' },
         @{ Path = $RegPath_WU; Name = 'DoNotConnectToWindowsUpdateInternetLocations' },
         @{ Path = $RegPath_WU; Name = 'SetDisableUXWUAccess' },
+        @{ Path = $RegPath_WU; Name = 'UpdateServiceUrlAlternate' },
         @{ Path = $RegPath_AU; Name = 'UseWUServer' }
     )
 
@@ -208,8 +209,8 @@ try {
 
     # --- Step 8: Clean up stale pause entries ---
     $pauseValues = @(
-        'PauseFeatureUpdatesStartTime', 'PauseFeatureUpdatesEndTime',
-        'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime'
+        'PauseFeatureUpdates', 'PauseFeatureUpdatesStartTime', 'PauseFeatureUpdatesEndTime',
+        'PauseQualityUpdates', 'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime'
     )
     foreach ($v in $pauseValues) {
         Remove-RegValue -Path $RegPath_WU -Name $v
