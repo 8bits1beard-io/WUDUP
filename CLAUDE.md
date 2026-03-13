@@ -21,11 +21,10 @@ WUDUP (Windows Update Dashboard: Unified Provisioning) is a PowerShell-based too
 - Exit 0 = WUfB compliant, Exit 1 = non-compliant (triggers remediation)
 - Purpose: discover if WUfB is managing the device, not configure it
 
-### WUDUP-Remediate.ps1 (~230 lines) — Intune Proactive Remediation
+### WUDUP-Remediate.ps1 (~190 lines) — Intune Proactive Remediation
 - Non-interactive, runs as SYSTEM
-- Configurable via `$Config_*` variables at top of script
-- Removes WSUS/stale config so the device falls under its assigned WUfB policy
-- Sets baseline PolicyDrivenSource + deferrals; actual policy details come from Intune Update Rings
+- Only removes blockers (WSUS config, stale pauses) and sets PolicyDrivenSource keys
+- Does NOT set update policies (deferrals, deadlines, version pins) — those come from Intune Update Rings
 - Includes SCCM co-management guard (CoManagementFlags bit 16)
 - Exit 0 = success, Exit 1 = failure
 

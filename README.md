@@ -69,27 +69,16 @@ Runs when detection reports non-compliant. Removes blockers so the device falls 
 2. Removes WSUS configuration (WUServer, UseWUServer, etc.)
 3. Sets PolicyDrivenSource keys to direct all update types to Windows Update
 4. Sets `UseUpdateClassPolicySource=1` (required for direct registry writes)
-5. Applies baseline deferral policies
-6. Optionally sets compliance deadlines, version pin, driver exclusion
-7. Cleans stale pause entries
-8. Triggers `usoclient StartScan` for immediate policy pickup
+5. Cleans stale pause entries
+6. Triggers `usoclient StartScan` for immediate policy pickup
+
+The script intentionally does **not** set update policies (deferrals, deadlines, version pins, etc.). Those should come from your Intune WUfB Update Ring assignment, which will apply automatically once the blockers are removed.
 
 ### Configuration
 
-Edit the `$Config_*` variables at the top of `WUDUP-Remediate.ps1`:
-
 ```powershell
-$Config_FeatureDeferralDays = 30       # 0-365, Microsoft recommends 30-90
-$Config_QualityDeferralDays = 7        # 0-30, Microsoft recommends 3-7
-$Config_FeatureDeadlineDays = 7        # Days after deferral to force install ($null = skip)
-$Config_QualityDeadlineDays = 3        # Days after deferral to force install ($null = skip)
-$Config_DeadlineGracePeriod = 2        # Grace period before forced reboot ($null = skip)
-$Config_AUOption            = 3        # 2=Notify, 3=Auto download+notify, 4=Auto+schedule
-$Config_ExcludeDrivers      = $null    # 1=exclude, 0=include, $null=not set
-$Config_AllowOnSCCM         = $false   # $true to force remediation on SCCM-managed devices
+$Config_AllowOnSCCM = $false   # $true to force remediation on SCCM-managed devices
 ```
-
-These are baseline defaults. The actual policy details (deferral periods, deadlines, etc.) should come from your Intune WUfB Update Ring policy, which will overwrite these values on the next sync.
 
 ### Deployment in Intune
 
