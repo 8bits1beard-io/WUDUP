@@ -53,50 +53,12 @@ The `-Report` switch suppresses all interactive output and returns a single `PSC
 
 ## Intune Proactive Remediation
 
-### Detection Script (`WUDUP-Detect.ps1`)
+The [`ProactiveRemediation/`](ProactiveRemediation/) folder contains a detect + remediate script pair for ensuring devices are managed by WUfB.
 
-Checks whether the device is managed by WUfB. Returns:
-- **Exit 0** — WUfB compliant (device is receiving updates via WUfB)
-- **Exit 1** — Non-compliant (WSUS, SCCM, auto-updates disabled, no policy, or dual-scan misconfiguration)
+- **Detection** checks for WUfB indicators (PolicyDrivenSource, deferrals, deadlines, version targeting, etc.) and blockers (`NoAutoUpdate`, WSUS, SCCM)
+- **Remediation** only removes blockers — it does not set update policies (those come from your Intune WUfB Update Ring)
 
-Checks all WUfB indicators: PolicyDrivenSource keys, deferral policies, version targeting, compliance deadlines, channel settings, and driver exclusion. Also detects blockers like `NoAutoUpdate=1` that prevent WUfB from functioning. Handles split-source configurations (WSUS + PolicyDrivenSource override) as compliant.
-
-### Remediation Script (`WUDUP-Remediate.ps1`)
-
-Runs when detection reports non-compliant. Removes blockers so the device falls under its assigned WUfB policy:
-
-1. Checks for SCCM — skips if WU workload hasn't been shifted to Intune
-2. Removes WSUS configuration (WUServer, UseWUServer, etc.)
-3. Sets PolicyDrivenSource keys to direct all update types to Windows Update
-4. Sets `UseUpdateClassPolicySource=1` (required for direct registry writes)
-5. Removes `NoAutoUpdate=1` if set (re-enables automatic updates)
-6. Cleans stale pause entries
-7. Triggers `usoclient StartScan` for immediate policy pickup
-
-The script intentionally does **not** set update policies (deferrals, deadlines, version pins, etc.). Those should come from your Intune WUfB Update Ring assignment, which will apply automatically once the blockers are removed.
-
-### Configuration
-
-```powershell
-$Config_AllowOnSCCM = $false   # $true to force remediation on SCCM-managed devices
-```
-
-### Deployment in Intune
-
-1. Navigate to **Devices > Remediations** (or **Proactive remediations**)
-2. Create a new remediation script package
-3. Upload `WUDUP-Detect.ps1` as the detection script
-4. Upload `WUDUP-Remediate.ps1` as the remediation script
-5. Set **Run this script using the logged-on credentials** to **No** (runs as SYSTEM)
-6. Assign to your target device groups
-
-### Logging
-
-Both scripts log to `%ProgramData%\WUDUP\Logs\`:
-- `detect.log` — detection results with timestamps
-- `remediate.log` — remediation actions with timestamps
-
-Logs are append-only and persist across runs for troubleshooting.
+See the [ProactiveRemediation README](ProactiveRemediation/README.md) for full detection logic, remediation actions, and deployment instructions.
 
 ## Dashboard Sections
 

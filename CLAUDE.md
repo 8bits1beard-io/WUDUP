@@ -15,13 +15,13 @@ WUDUP (Windows Update Dashboard: Unified Provisioning) is a PowerShell-based too
 - Backup/restore system (`%ProgramData%\WUDUP\Backups` as `.json` files)
 - Runs interactively with `Read-Host` prompts; uses `Write-Host` for display
 
-### WUDUP-Detect.ps1 (~190 lines) — Intune Proactive Remediation Detection
+### ProactiveRemediation/WUDUP-Detect.ps1 (~220 lines) — Intune Proactive Remediation Detection
 - Non-interactive, runs as SYSTEM
 - Uses `Write-Output` (not `Write-Host`) for Intune to capture
 - Exit 0 = WUfB compliant, Exit 1 = non-compliant (triggers remediation)
 - Purpose: discover if WUfB is managing the device, not configure it
 
-### WUDUP-Remediate.ps1 (~190 lines) — Intune Proactive Remediation
+### ProactiveRemediation/WUDUP-Remediate.ps1 (~200 lines) — Intune Proactive Remediation
 - Non-interactive, runs as SYSTEM
 - Only removes blockers (WSUS config, stale pauses) and sets PolicyDrivenSource keys
 - Does NOT set update policies (deferrals, deadlines, version pins) — those come from Intune Update Rings
