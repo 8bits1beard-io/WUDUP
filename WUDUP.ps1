@@ -12,8 +12,9 @@
     Compatible with PowerShell 5.1 and PowerShell 7+.
 
 .NOTES
-    Author:  Device-DNA Project
+    Author:  Joshua Walderbach
     Tool:    WUDUP v1.0.0
+    Created: 12 March 2026
     Requires: Windows 10 or Windows 11, Administrator for modifications
 #>
 

@@ -20,8 +20,9 @@
     Exit 1 = Remediation failed
 
 .NOTES
-    Author:  Device-DNA Project
+    Author:  Joshua Walderbach
     Tool:    WUDUP Remediation v1.2.0
+    Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
 

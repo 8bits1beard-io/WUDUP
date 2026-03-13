@@ -24,8 +24,9 @@
     Exit 1 = WUfB not detected (non-compliant, triggers remediation)
 
 .NOTES
-    Author:  Device-DNA Project
+    Author:  Joshua Walderbach
     Tool:    WUDUP Detection v1.2.0
+    Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
 
