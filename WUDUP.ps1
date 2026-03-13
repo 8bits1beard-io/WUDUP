@@ -138,16 +138,26 @@ function Get-WUServiceState {
 }
 
 function Get-UpdateStatus {
-    $rebootWU = Test-Path "$script:RegPath_WUAutoUpdate\RebootRequired"
-    $rebootCBS = Test-Path "$script:RegPath_CBS\RebootPending"
+    # Primary: COM API — same source the Settings app uses
+    $rebootCOM = $false
+    try {
+        $sysInfo = New-Object -ComObject Microsoft.Update.SystemInfo
+        $rebootCOM = [bool]$sysInfo.RebootRequired
+    }
+    catch { }
+
+    # Secondary: registry keys for supplemental detail
+    $rebootWUReg = Test-Path "$script:RegPath_WUAutoUpdate\RebootRequired"
+    $rebootCBS   = Test-Path "$script:RegPath_CBS\RebootPending"
+
     $lastInstall = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Install" -Name 'LastSuccessTime'
-    $lastDetect = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Detect" -Name 'LastSuccessTime'
+    $lastDetect  = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Detect" -Name 'LastSuccessTime'
     return [PSCustomObject]@{
-        RebootRequired   = ($rebootWU -or $rebootCBS)
-        RebootRequiredWU = $rebootWU
-        RebootRequiredCBS = $rebootCBS
-        LastInstallTime  = $lastInstall
-        LastDetectTime   = $lastDetect
+        RebootRequired      = $rebootCOM      # Authoritative — matches Settings app
+        RebootRequiredWUReg = $rebootWUReg     # WU registry flag (supplemental)
+        RebootRequiredCBS   = $rebootCBS       # CBS flag (often stale)
+        LastInstallTime     = $lastInstall
+        LastDetectTime      = $lastDetect
     }
 }
 
@@ -757,10 +767,19 @@ function Show-UpdateReport {
     # --- Update Status ---
     Write-Section "Update Status"
     if ($UpdateStatus.RebootRequired) {
-        $rebootDetail = @()
-        if ($UpdateStatus.RebootRequiredWU) { $rebootDetail += 'Windows Update' }
-        if ($UpdateStatus.RebootRequiredCBS) { $rebootDetail += 'Component Servicing' }
-        Write-ReportLine "Pending Reboot" "YES ($($rebootDetail -join ', '))" 'Red'
+        # COM API says reboot needed — authoritative, matches Settings app
+        $sources = @()
+        if ($UpdateStatus.RebootRequiredWUReg) { $sources += 'WU registry' }
+        if ($UpdateStatus.RebootRequiredCBS)   { $sources += 'CBS' }
+        $detail = if ($sources.Count -gt 0) { " (flags: $($sources -join ', '))" } else { '' }
+        Write-ReportLine "Pending Reboot" "YES$detail" 'Red'
+    }
+    elseif ($UpdateStatus.RebootRequiredWUReg -or $UpdateStatus.RebootRequiredCBS) {
+        # Registry flags present but COM API says no reboot needed — stale flags
+        $sources = @()
+        if ($UpdateStatus.RebootRequiredWUReg) { $sources += 'WU registry' }
+        if ($UpdateStatus.RebootRequiredCBS)   { $sources += 'CBS' }
+        Write-ReportLine "Pending Reboot" "No (stale $($sources -join ', ') flag present)" 'Yellow'
     }
     else {
         Write-ReportLine "Pending Reboot" "No" 'Green'
