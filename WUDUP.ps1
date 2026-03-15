@@ -1465,7 +1465,11 @@ function Set-AutoUpdateBehavior {
 
     try {
         Ensure-RegistryPath -Path $script:RegPath_AU
-        New-ItemProperty -Path $script:RegPath_AU -Name 'NoAutoUpdate' -Value 0 -PropertyType DWord -Force | Out-Null
+        # Remove NoAutoUpdate rather than writing 0 — "not configured" requires the value to not exist
+        $noAutoUpdateCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
+        if ($noAutoUpdateCurrent -eq 1) {
+            Remove-ItemProperty -Path $script:RegPath_AU -Name 'NoAutoUpdate' -ErrorAction SilentlyContinue
+        }
         New-ItemProperty -Path $script:RegPath_AU -Name 'AUOptions' -Value $auOption -PropertyType DWord -Force | Out-Null
 
         if ($null -ne $installDay) {
@@ -2143,7 +2147,11 @@ function Switch-ToWSUS {
         return
     }
 
-    $toSet += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate'; Value = 0; Type = 'DWord' }
+    # Remove NoAutoUpdate rather than writing 0 — "not configured" requires the value to not exist
+    $noAutoUpdateCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
+    if ($noAutoUpdateCurrent -eq 1) {
+        $toRemove += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate' }
+    }
     $toSet += @{ Path = $script:RegPath_AU; Name = 'AUOptions'; Value = $auOption; Type = 'DWord' }
 
     Show-SourceChangePreview -TargetSource "WSUS ($wuServer)" -ToRemove $toRemove -ToSet $toSet
