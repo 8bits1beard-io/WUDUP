@@ -38,6 +38,20 @@ This document catalogs every data source that WUDUP reads, organized by category
 - **Purpose**: Authoritative pending reboot status. This is the same source the Windows Settings app queries. More reliable than registry flags, which can be stale (especially CBS `RebootPending`). Registry flags are retained as supplemental detail.
 - **Used in**: `Get-UpdateStatus`
 
+### Microsoft.Update.Session
+
+- **Method**: `New-Object -ComObject Microsoft.Update.Session`
+- **Properties**: `CreateUpdateSearcher()` → searcher; `QueryHistory()` on the searcher object
+- **Purpose**: Queries the local Windows Update history log. Used to retrieve the last 10 installed/failed updates with title, date, and result code. Same data visible in Settings → Windows Update → Update History.
+- **Used in**: `Get-RecentUpdateHistory`
+
+### Microsoft.Update.ServiceManager
+
+- **Method**: `New-Object -ComObject Microsoft.Update.ServiceManager`
+- **Properties**: `Services` collection → each service has `Name`, `ServiceID`, `IsRegisteredWithAU`, `IsDefaultAUService`
+- **Purpose**: Enumerates update service registrations from the Windows Update agent at runtime. Shows which services (Windows Update, Microsoft Update, WSUS, etc.) are registered and which is the active Automatic Update source. Complements registry-based detection with live agent state.
+- **Used in**: `Get-RegisteredUpdateServices`
+
 ---
 
 ## WMI/CIM Classes
@@ -70,7 +84,7 @@ The primary location for Group Policy-delivered Windows Update settings. When In
 | `SetPolicyDrivenUpdateSourceForDriverUpdates` | DWORD | Same as above, for driver updates. |
 | `SetPolicyDrivenUpdateSourceForOtherUpdates` | DWORD | Same as above, for definition updates and other content. |
 | `DeferFeatureUpdatesPeriodInDays` | DWORD | Feature update deferral (0-365 days). GP writes this as `DeferFeatureUpdatesPeriodinDays` (lowercase 'i') but registry is case-insensitive. |
-| `DeferQualityUpdatesPeriodInDays` | DWORD | Quality update deferral (0-35 days). |
+| `DeferQualityUpdatesPeriodInDays` | DWORD | Quality update deferral (0-30 days). |
 | `ConfigureDeadlineForFeatureUpdates` | DWORD | Feature update compliance deadline (CSP/MDM name). GP writes this as `ComplianceDeadlineForFU`. Both names are checked. |
 | `ComplianceDeadlineForFU` | DWORD | Feature update compliance deadline (GP-native name). Fallback when `ConfigureDeadlineForFeatureUpdates` is absent. |
 | `ConfigureDeadlineForQualityUpdates` | DWORD | Quality update compliance deadline (CSP/MDM name). GP writes this as `ComplianceDeadline`. Both names are checked. |
@@ -82,7 +96,8 @@ The primary location for Group Policy-delivered Windows Update settings. When In
 | `TargetReleaseVersion` | DWORD | `1`=version pinning enabled, `0` or absent=disabled. |
 | `TargetReleaseVersionInfo` | REG_SZ | Target version string (e.g., `24H2`). Only effective when `TargetReleaseVersion=1`. |
 | `ProductVersion` | REG_SZ | Target product (e.g., `Windows 11`). Used with `TargetReleaseVersionInfo`. |
-| `BranchReadinessLevel` | DWORD | Servicing channel. Legacy on Windows 11 (only General Availability exists). Values: `2`=Insider Fast, `4`=Insider Slow, `16`=SAC Preview, `32`=GA Channel. |
+| `UpdateServiceUrlAlternate` | REG_SZ | Alternate/fallback WSUS URL. Used when the primary `WUServer` is unreachable. Removed by WUDUP alongside `WUServer` when switching to WUfB. |
+| `BranchReadinessLevel` | DWORD | Servicing channel. Legacy on Windows 11 (only General Availability exists). Values: `2`=Insider Fast, `4`=Insider Slow, `8`=Release Preview, `16`=Semi-Annual Channel (Targeted), `32`=General Availability Channel, `64`=Release Preview (Quality Updates Only), `128`=Canary Channel. |
 | `ManagePreviewBuilds` | DWORD | `0`=disable preview, `1`=disable when next release public, `2`=enable, `3`=user choice. Not deprecated. |
 | `ExcludeWUDriversInQualityUpdate` | DWORD | `1`=exclude drivers from WU quality updates, `0`=include (default). |
 | `DisableDualScan` | DWORD | `1`=suppress dual-scan behavior. Legacy, deprecated on Windows 11. Replaced by PolicyDrivenSource keys. |
