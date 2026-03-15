@@ -168,6 +168,18 @@ try {
     $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
     $hasSCCM     = ($null -ne $sccmService -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'))
 
+    # Check co-management: if the WU workload is shifted to Intune (CoManagementFlags bit 16),
+    # SCCM no longer controls updates — evaluate as Intune-managed instead.
+    # Mirrors the co-management check in WUDUP-Remediate.ps1.
+    $wuShiftedToIntune = $false
+    if ($hasSCCM) {
+        $coMgmtFlags = Get-SafeRegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\CCM' -Name 'CoManagementFlags'
+        $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
+        if ($wuShiftedToIntune) {
+            $hasSCCM = $false
+        }
+    }
+
     # ========================================================================
     #  EVALUATE COMPLIANCE
     # ========================================================================
@@ -213,6 +225,9 @@ try {
         $wsusDetail = $wuServer
         if ($null -ne $wuStatusServer) { $wsusDetail += ", Status: $wuStatusServer" }
         $msg = "NON-COMPLIANT: Device is using WSUS ($wsusDetail), no WUfB policies detected."
+    }
+    elseif ($wuShiftedToIntune) {
+        $msg = "NON-COMPLIANT: Co-managed device (WU workload assigned to Intune), no WUfB policies detected."
     }
     elseif ($hasSCCM) {
         $msg = "NON-COMPLIANT: Device is managed by SCCM/ConfigMgr. No WUfB policies detected."
