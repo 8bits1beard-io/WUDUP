@@ -1657,6 +1657,10 @@ function Backup-WUSettings {
         @{ Name = 'AU';                Path = $script:RegPath_AU }
         @{ Name = 'UXSettings';        Path = $script:RegPath_UX }
         @{ Name = 'DOPolicy';          Path = $script:RegPath_DO_Policy }
+        # MDM PolicyManager path is included so restores are complete. Note: if the device
+        # still has an active Intune enrollment these values will be re-delivered on next
+        # MDM sync and the restore will be overwritten.
+        @{ Name = 'MDMUpdate';         Path = $script:RegPath_MDM }
     )
 
     foreach ($entry in $pathsToBackup) {
@@ -1770,7 +1774,9 @@ function Restore-WUSettings {
                 }
             }
 
-            # Write backed-up values
+            # Write backed-up values. For the MDMUpdate path (PolicyManager), note that if
+            # the device still has an active Intune enrollment these values will be re-delivered
+            # on next MDM sync and the restore will be overwritten by policy.
             Ensure-RegistryPath -Path $regPath
             foreach ($valName in $pathData.Values.PSObject.Properties.Name) {
                 if ($isV2) {
@@ -1891,6 +1897,25 @@ function Get-WUfBCleanupItems {
         $current = Get-SafeRegistryValue -Path $script:RegPath_AU -Name $v
         if ($null -ne $current) {
             $items += @{ Path = $script:RegPath_AU; Name = $v }
+        }
+    }
+
+    # MDM PolicyManager path — same WUfB indicator values delivered via CSP.
+    # Note: if the device still has an active Intune enrollment these values will be
+    # re-delivered on next MDM sync. Cleanup here prevents dual-scan immediately after
+    # the switch but Intune policy must also be updated for a permanent change.
+    $mdmValues = @('DeferFeatureUpdatesPeriodInDays', 'DeferQualityUpdatesPeriodInDays',
+                   'SetPolicyDrivenUpdateSourceForFeatureUpdates', 'SetPolicyDrivenUpdateSourceForQualityUpdates',
+                   'SetPolicyDrivenUpdateSourceForDriverUpdates', 'SetPolicyDrivenUpdateSourceForOtherUpdates',
+                   'ConfigureDeadlineForFeatureUpdates', 'ConfigureDeadlineForQualityUpdates',
+                   'ConfigureDeadlineGracePeriod', 'ConfigureDeadlineGracePeriodForFeatureUpdates',
+                   'TargetReleaseVersion', 'TargetReleaseVersionInfo', 'ProductVersion',
+                   'BranchReadinessLevel', 'ManagePreviewBuilds',
+                   'ExcludeWUDriversInQualityUpdate')
+    foreach ($v in $mdmValues) {
+        $current = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name $v
+        if ($null -ne $current) {
+            $items += @{ Path = $script:RegPath_MDM; Name = $v }
         }
     }
 
