@@ -113,6 +113,37 @@ function Get-AllRegistryValues {
     return $result
 }
 
+function Get-RegistryValuesWithType {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    $result = [ordered]@{}
+    if (-not (Test-Path -Path $Path)) { return $result }
+    try {
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+        foreach ($name in $key.GetValueNames()) {
+            try {
+                $kind = $key.GetValueKind($name)
+                if ($kind -eq [Microsoft.Win32.RegistryValueKind]::ExpandString) {
+                    # Read raw unexpanded string so the literal %VAR% text is preserved
+                    $data = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                }
+                else {
+                    $data = $key.GetValue($name)
+                }
+                if ($kind -eq [Microsoft.Win32.RegistryValueKind]::Binary) {
+                    $data = [Convert]::ToBase64String([byte[]]$data)
+                }
+                $result[$name] = [ordered]@{ Type = $kind.ToString(); Data = $data }
+            }
+            catch { }
+        }
+    }
+    catch { }
+    return $result
+}
+
 function Test-ActiveMDMEnrollment {
     if (-not (Test-Path $script:RegPath_Enrollments)) { return $null }
     try {
@@ -1594,9 +1625,10 @@ function Backup-WUSettings {
     $backupFile = Join-Path $backupDir "wudup_backup_${timestamp}_${Reason}.json"
 
     $backup = [ordered]@{
-        Timestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        Reason    = $Reason
-        Paths     = [ordered]@{}
+        Timestamp     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Reason        = $Reason
+        FormatVersion = 2
+        Paths         = [ordered]@{}
     }
 
     $pathsToBackup = @(
@@ -1607,9 +1639,9 @@ function Backup-WUSettings {
     )
 
     foreach ($entry in $pathsToBackup) {
-        $values = Get-AllRegistryValues -Path $entry.Path
+        $values = Get-RegistryValuesWithType -Path $entry.Path
         if ($values.Count -gt 0) {
-            $backup.Paths[$entry.Name] = @{
+            $backup.Paths[$entry.Name] = [ordered]@{
                 RegistryPath = $entry.Path
                 Values       = $values
             }
@@ -1699,6 +1731,9 @@ function Restore-WUSettings {
     $preRestoreBackup = Backup-WUSettings -Reason 'pre-restore'
     Write-Host "  Current settings backed up to: $preRestoreBackup" -ForegroundColor DarkGray
 
+    # FormatVersion 2 stores { Type, Data } per value; older files store raw values
+    $isV2 = ($null -ne $backup.FormatVersion -and [int]$backup.FormatVersion -ge 2)
+
     try {
         foreach ($pathName in $backup.Paths.PSObject.Properties.Name) {
             $pathData = $backup.Paths.$pathName
@@ -1717,12 +1752,30 @@ function Restore-WUSettings {
             # Write backed-up values
             Ensure-RegistryPath -Path $regPath
             foreach ($valName in $pathData.Values.PSObject.Properties.Name) {
-                $val = $pathData.Values.$valName
-                if ($val -is [int] -or $val -is [long]) {
-                    New-ItemProperty -Path $regPath -Name $valName -Value $val -PropertyType DWord -Force | Out-Null
+                if ($isV2) {
+                    # New format: each entry is { Type: "DWord"|"String"|..., Data: <value> }
+                    $entry    = $pathData.Values.$valName
+                    $typeName = $entry.Type
+                    $rawData  = $entry.Data
+
+                    $writeValue = switch ($typeName) {
+                        'DWord'       { [int32][double]$rawData }
+                        'QWord'       { [int64][double]$rawData }
+                        'Binary'      { [Convert]::FromBase64String([string]$rawData) }
+                        'MultiString' { [string[]]($rawData) }
+                        default       { [string]$rawData }
+                    }
+                    New-ItemProperty -Path $regPath -Name $valName -Value $writeValue -PropertyType $typeName -Force | Out-Null
                 }
                 else {
-                    New-ItemProperty -Path $regPath -Name $valName -Value $val.ToString() -PropertyType String -Force | Out-Null
+                    # Old format: raw value with no type information
+                    $val = $pathData.Values.$valName
+                    if ($val -is [int] -or $val -is [long]) {
+                        New-ItemProperty -Path $regPath -Name $valName -Value $val -PropertyType DWord -Force | Out-Null
+                    }
+                    else {
+                        New-ItemProperty -Path $regPath -Name $valName -Value $val.ToString() -PropertyType String -Force | Out-Null
+                    }
                 }
             }
         }

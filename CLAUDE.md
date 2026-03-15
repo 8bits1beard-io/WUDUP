@@ -76,6 +76,25 @@ SCCM (with co-management check) → MDM/Intune (with enrollment verification) �
 ### COM Objects
 - `Microsoft.Update.SystemInfo` — authoritative pending reboot check (matches Settings app). Registry flags (`RebootRequired`, CBS `RebootPending`) are supplemental/often stale.
 
+## Running the Scripts
+
+```powershell
+# Interactive dashboard (read-only without admin, modification menu with admin)
+.\WUDUP.ps1
+
+# Non-interactive structured report (returns a PSCustomObject, no Write-Host output)
+.\WUDUP.ps1 -Report
+
+# Fleet collection via remoting
+Invoke-Command -ComputerName $devices -FilePath .\WUDUP.ps1 -ArgumentList @($true)
+```
+
+Detect and Remediate are uploaded to Intune and run as SYSTEM — they are not meant to be run locally except for manual testing. Both log to `%ProgramData%\WUDUP\Logs\detect.log` and `remediate.log` (append-only).
+
+### Remediate Configuration
+
+`$Config_AllowOnSCCM = $false` (top of WUDUP-Remediate.ps1) — set to `$true` to force remediation even when SCCM is detected. Default is to skip remediation on SCCM-managed devices.
+
 ## Development Notes
 
 - **PowerShell 5.1 compatible** — no PS 7+ only syntax. All scripts start with `#Requires -Version 5.1`.
