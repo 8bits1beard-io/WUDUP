@@ -1585,6 +1585,7 @@ function Set-PauseUpdates {
                 if (Test-Path $script:RegPath_WU) {
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseFeatureUpdatesStartTime' -ErrorAction SilentlyContinue
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseFeatureUpdatesEndTime' -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseFeatureUpdates' -ErrorAction SilentlyContinue
                 }
                 # UX Settings path (user-initiated pauses)
                 if (Test-Path $script:RegPath_UX) {
@@ -1598,6 +1599,7 @@ function Set-PauseUpdates {
                 if (Test-Path $script:RegPath_WU) {
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseQualityUpdatesStartTime' -ErrorAction SilentlyContinue
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseQualityUpdatesEndTime' -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseQualityUpdates' -ErrorAction SilentlyContinue
                 }
                 # UX Settings path (user-initiated pauses)
                 if (Test-Path $script:RegPath_UX) {
