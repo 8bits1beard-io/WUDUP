@@ -68,34 +68,37 @@ See the [ProactiveRemediation README](ProactiveRemediation/README.md) for full d
 | Management Authority | Who manages updates (SCCM/Intune/WSUS/GPO/Local), co-management state |
 | Windows Update Service | wuauserv + UsoSvc status and startup type |
 | Update Status | Pending reboot (COM API), last install/scan time |
-| Recent Update History | Last 10 updates with result status |
 | OS Version Pinning | TargetReleaseVersion, ProductVersion |
-| Update Source | WSUS server, UseWUServer, dual-scan detection |
-| Policy-Driven Update Source | Per-type source (Feature/Quality/Driver/Other) |
-| Registered Update Services | Runtime WU agent services via COM API |
+| Update Source | WSUS server, UseWUServer, BlockInternetWU, dual-scan detection |
+| Policy-Driven Update Source | Per-type source (Feature/Quality/Driver/Other) — shown only when configured |
 | Deferral Policies | Feature/quality deferral days and source |
-| Compliance Deadlines | Feature/quality deadlines and grace periods |
-| Channel / Preview Builds | BranchReadinessLevel, ManagePreviewBuilds |
-| Auto-Update Behavior | AUOptions, scheduled install, always reboot |
-| Pause State | Feature/quality pause with expiry |
+| Compliance Deadlines | Feature/quality deadlines and grace periods — shown only when configured |
+| Channel / Preview Builds | BranchReadinessLevel, ManagePreviewBuilds — shown only when configured |
+| Auto-Update Behavior | AUOptions, scheduled install, always reboot, SetDisableUXWUAccess |
+| Pause Status | Feature/quality pause with expiry |
 | Active Hours | Policy-enforced or user-set, smart active hours |
 | Delivery Optimization | Download mode and source |
-| Update UI Access | SetDisableUXWUAccess, BlockInternetWU |
+| Recent Update History | Last 10 updates with result status — shown only when history available |
+| Registered Update Services | Runtime WU agent services via COM API — shown only when services registered |
 
 ## Modification Menu (Admin Only)
 
 When running as Administrator, WUDUP offers an interactive menu:
 
 - **[1]** Set OS version pin
-- **[2]** Set deferral periods
-- **[3]** Set auto-update behavior
-- **[4]** Set active hours
-- **[5]** Pause/unpause updates
-- **[S]** Switch update source (WUfB / WSUS / Microsoft Update)
+- **[2]** Remove OS version pin
+- **[3]** Set deferral periods
+- **[4]** Configure auto-update behavior
+- **[5]** Set active hours
+- **[6]** Pause updates
+- **[7]** Unpause updates
+- **[S]** Switch update source (WUfB / WSUS / Direct)
 - **[B]** Backup current settings
-- **[R]** Restore from backup
+- **[R]** Restore settings from backup
+- **[8]** Refresh report
+- **[0]** Exit
 
-Source switching automatically backs up current settings before making changes. Backups are stored as JSON at `%ProgramData%\WUDUP\Backups\`.
+Source switching automatically backs up current settings before making changes. Backups are stored as JSON at `%ProgramData%\WUDUP\Backups\`. Backups use a typed format (v2) that records the registry value type (DWord, String, ExpandString, Binary, etc.) alongside each value so it is restored with the correct type. The MDM PolicyManager path is included in backups; if the device has an active Intune enrollment, MDM values will be re-delivered on the next sync and will overwrite any restored values.
 
 ## Data Sources
 
