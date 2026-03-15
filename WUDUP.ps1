@@ -1398,7 +1398,11 @@ function Set-DeferralPolicy {
         Ensure-RegistryPath -Path $script:RegPath_WU
 
         if (-not [string]::IsNullOrWhiteSpace($featureInput)) {
-            $featureDays = [int]$featureInput
+            $featureDays = 0
+            if (-not [int]::TryParse($featureInput, [ref]$featureDays)) {
+                Write-Host "  ERROR: Enter a whole number for feature deferral days." -ForegroundColor Red
+                return
+            }
             if ($featureDays -lt 0 -or $featureDays -gt 365) {
                 Write-Host "  ERROR: Feature deferral must be 0-365." -ForegroundColor Red
                 return
@@ -1408,7 +1412,11 @@ function Set-DeferralPolicy {
         }
 
         if (-not [string]::IsNullOrWhiteSpace($qualityInput)) {
-            $qualityDays = [int]$qualityInput
+            $qualityDays = 0
+            if (-not [int]::TryParse($qualityInput, [ref]$qualityDays)) {
+                Write-Host "  ERROR: Enter a whole number for quality deferral days." -ForegroundColor Red
+                return
+            }
             if ($qualityDays -lt 0 -or $qualityDays -gt 30) {
                 Write-Host "  ERROR: Quality deferral must be 0-30." -ForegroundColor Red
                 return
@@ -1442,7 +1450,11 @@ function Set-AutoUpdateBehavior {
         return
     }
 
-    $auOption = [int]$auInput
+    $auOption = 0
+    if (-not [int]::TryParse($auInput, [ref]$auOption)) {
+        Write-Host "  ERROR: Enter a whole number (2-5)." -ForegroundColor Red
+        return
+    }
     if ($auOption -lt 2 -or $auOption -gt 5) {
         Write-Host "  ERROR: Must be 2-5." -ForegroundColor Red
         return
@@ -1455,11 +1467,23 @@ function Set-AutoUpdateBehavior {
         Write-Host "  Schedule install day:" -ForegroundColor Gray
         Write-Host "    0 = Every day, 1 = Sunday, 2 = Monday, ... 7 = Saturday" -ForegroundColor White
         $dayInput = Read-Host "  Install day (0-7, blank for every day)"
-        if (-not [string]::IsNullOrWhiteSpace($dayInput)) { $installDay = [int]$dayInput }
+        if (-not [string]::IsNullOrWhiteSpace($dayInput)) {
+            $installDay = 0
+            if (-not [int]::TryParse($dayInput, [ref]$installDay)) {
+                Write-Host "  ERROR: Enter a whole number (0-7)." -ForegroundColor Red
+                return
+            }
+        }
         else { $installDay = 0 }
 
         $hourInput = Read-Host "  Install hour (0-23, e.g. 3 for 3:00 AM)"
-        if (-not [string]::IsNullOrWhiteSpace($hourInput)) { $installHour = [int]$hourInput }
+        if (-not [string]::IsNullOrWhiteSpace($hourInput)) {
+            $installHour = 0
+            if (-not [int]::TryParse($hourInput, [ref]$installHour)) {
+                Write-Host "  ERROR: Enter a whole number (0-23)." -ForegroundColor Red
+                return
+            }
+        }
         else { $installHour = 3 }
     }
 
@@ -1507,8 +1531,16 @@ function Set-ActiveHours {
         return
     }
 
-    $startH = [int]$startInput
-    $endH = [int]$endInput
+    $startH = 0
+    if (-not [int]::TryParse($startInput, [ref]$startH)) {
+        Write-Host "  ERROR: Enter a whole number (0-23)." -ForegroundColor Red
+        return
+    }
+    $endH = 0
+    if (-not [int]::TryParse($endInput, [ref]$endH)) {
+        Write-Host "  ERROR: Enter a whole number (0-23)." -ForegroundColor Red
+        return
+    }
 
     if ($startH -lt 0 -or $startH -gt 23 -or $endH -lt 0 -or $endH -gt 23) {
         Write-Host "  ERROR: Values must be 0-23." -ForegroundColor Red
@@ -1598,7 +1630,13 @@ function Set-PauseUpdates {
     Write-Host ""
     $daysInput = Read-Host "  Pause duration in days (1-35, default: 35)"
     if ([string]::IsNullOrWhiteSpace($daysInput)) { $pauseDays = 35 }
-    else { $pauseDays = [int]$daysInput }
+    else {
+        $pauseDays = 0
+        if (-not [int]::TryParse($daysInput, [ref]$pauseDays)) {
+            Write-Host "  ERROR: Enter a whole number (1-35)." -ForegroundColor Red
+            return
+        }
+    }
 
     if ($pauseDays -lt 1 -or $pauseDays -gt 35) {
         Write-Host "  ERROR: Pause duration must be 1-35 days." -ForegroundColor Red
