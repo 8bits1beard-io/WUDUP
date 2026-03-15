@@ -1822,6 +1822,12 @@ function Restore-WUSettings {
                     $typeName = $entry.Type
                     $rawData  = $entry.Data
 
+                    $validKinds = @('String','ExpandString','Binary','DWord','MultiString','QWord')
+                    if ($typeName -notin $validKinds) {
+                        Write-Host "  WARNING: Unrecognized registry type '$typeName' for value '$valName' — restoring as String." -ForegroundColor Yellow
+                        $typeName = 'String'
+                    }
+
                     $writeValue = switch ($typeName) {
                         'DWord'       { [int32][double]$rawData }
                         'QWord'       { [int64][double]$rawData }
