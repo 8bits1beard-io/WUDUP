@@ -2198,6 +2198,13 @@ function Switch-ToWSUS {
         Write-Host "  Cancelled - no server entered." -ForegroundColor Yellow
         return
     }
+    $parsedUri = $null
+    if (-not [Uri]::TryCreate($wuServer, [UriKind]::Absolute, [ref]$parsedUri) -or
+        ($parsedUri.Scheme -ne 'http' -and $parsedUri.Scheme -ne 'https') -or
+        [string]::IsNullOrWhiteSpace($parsedUri.Host)) {
+        Write-Host "  ERROR: Enter a valid URL starting with http:// or https:// (e.g., http://wsus.contoso.com:8530)." -ForegroundColor Red
+        return
+    }
 
     $statusServer = Read-Host "  WSUS Status Server URL (blank = same as WSUS server)"
     if ([string]::IsNullOrWhiteSpace($statusServer)) { $statusServer = $wuServer }
