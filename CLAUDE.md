@@ -25,7 +25,7 @@ WUDUP (Windows Update Dashboard: Unified Provisioning) is a PowerShell-based too
 - Non-interactive, runs as SYSTEM
 - Only removes blockers (WSUS config, stale pauses) and sets PolicyDrivenSource keys
 - Does NOT set update policies (deferrals, deadlines, version pins) — those come from Intune Update Rings
-- Includes SCCM co-management guard (CoManagementFlags bit 16)
+- Includes SCCM co-management guard (CoManagementFlags value 16 (bit position 4))
 - Exit 0 = success, Exit 1 = failure
 
 ## Architecture — Cross-Script Consistency
