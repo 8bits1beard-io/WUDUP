@@ -13,7 +13,7 @@
 
 .NOTES
     Author:  Joshua Walderbach
-    Tool:    WUDUP v1.0.0
+    Tool:    WUDUP v1.4.0
     Created: 12 March 2026
     Requires: Windows 10 or Windows 11, Administrator for modifications
 #>
@@ -31,7 +31,6 @@ $script:RegPath_AU        = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUp
 $script:RegPath_MDM       = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update'
 $script:RegPath_UX        = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'
 $script:RegPath_Pause     = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\Settings'
-$script:RegPath_PolicySt  = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\PolicyState'
 $script:RegPath_DO_Policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'
 $script:RegPath_DO_MDM    = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\DeliveryOptimization'
 $script:RegPath_NTCur        = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'

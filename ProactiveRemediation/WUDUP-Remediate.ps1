@@ -24,7 +24,7 @@
 
 .NOTES
     Author:  Joshua Walderbach
-    Tool:    WUDUP Remediation v1.3.0
+    Tool:    WUDUP Remediation v1.4.0
     Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
