@@ -1550,18 +1550,35 @@ function Set-PauseUpdates {
 
         try {
             if ($typeInput -eq '1' -or $typeInput -eq '3') {
+                # GP path (policy-driven pauses)
                 if (Test-Path $script:RegPath_WU) {
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseFeatureUpdatesStartTime' -ErrorAction SilentlyContinue
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseFeatureUpdatesEndTime' -ErrorAction SilentlyContinue
                 }
+                # UX Settings path (user-initiated pauses)
+                if (Test-Path $script:RegPath_UX) {
+                    Remove-ItemProperty -Path $script:RegPath_UX -Name 'PauseFeatureUpdatesStartTime' -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $script:RegPath_UX -Name 'PauseFeatureUpdatesEndTime' -ErrorAction SilentlyContinue
+                }
                 Write-Host "  Feature updates unpaused." -ForegroundColor Green
             }
             if ($typeInput -eq '2' -or $typeInput -eq '3') {
+                # GP path (policy-driven pauses)
                 if (Test-Path $script:RegPath_WU) {
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseQualityUpdatesStartTime' -ErrorAction SilentlyContinue
                     Remove-ItemProperty -Path $script:RegPath_WU -Name 'PauseQualityUpdatesEndTime' -ErrorAction SilentlyContinue
                 }
+                # UX Settings path (user-initiated pauses)
+                if (Test-Path $script:RegPath_UX) {
+                    Remove-ItemProperty -Path $script:RegPath_UX -Name 'PauseQualityUpdatesStartTime' -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $script:RegPath_UX -Name 'PauseQualityUpdatesEndTime' -ErrorAction SilentlyContinue
+                }
                 Write-Host "  Quality updates unpaused." -ForegroundColor Green
+            }
+            # PauseUpdatesExpiryTime in UX Settings is a consolidated expiry covering all update
+            # types — only safe to remove when unpausing both
+            if ($typeInput -eq '3' -and (Test-Path $script:RegPath_UX)) {
+                Remove-ItemProperty -Path $script:RegPath_UX -Name 'PauseUpdatesExpiryTime' -ErrorAction SilentlyContinue
             }
         }
         catch {
