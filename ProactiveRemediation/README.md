@@ -27,11 +27,14 @@ flowchart TD
     PolicyDriven -- Yes --> C_Split([COMPLIANT\nsplit-source])
     PolicyDriven -- No --> NC_Dual[/"NON-COMPLIANT\ndual-scan risk"/]
 
-    HasSCCM -- Yes --> NC_SCCM[/"NON-COMPLIANT\nSCCM managed"/]
     HasSCCM -- No --> HasIndicators{WUfB indicators\npresent?}
+    HasSCCM -- Yes --> CoMgmt{WU workload\nshifted to Intune?}
+
+    CoMgmt -- No --> NC_SCCM[/"NON-COMPLIANT\nSCCM managed"/]
+    CoMgmt -- Yes --> HasIndicators
 
     HasIndicators -- Yes --> C_WUfB([COMPLIANT\nWUfB managed])
-    HasIndicators -- No --> NC_None[/"NON-COMPLIANT\nno policy"/]
+    HasIndicators -- No --> NC_None[/"NON-COMPLIANT\nno WUfB policy"/]
 
     style C_WUfB fill:#2d6a2d,color:#fff
     style C_Split fill:#2d6a2d,color:#fff
@@ -63,10 +66,10 @@ The script collects indicators that the device is managed by WUfB. Any indicator
 | Feature deferral | `DeferFeatureUpdatesPeriodInDays` | GP then MDM |
 | Quality deferral | `DeferQualityUpdatesPeriodInDays` | GP then MDM |
 | Version targeting | `TargetReleaseVersion = 1` + `TargetReleaseVersionInfo` + `ProductVersion` | GP then MDM |
-| Feature deadline | `ConfigureDeadlineForFeatureUpdates` (MDM name), fallback `ComplianceDeadlineForFU` (GP name) | MDM then GP |
-| Quality deadline | `ConfigureDeadlineForQualityUpdates` (MDM name), fallback `ComplianceDeadline` (GP name) | MDM then GP |
-| Grace period | `ConfigureDeadlineGracePeriod` (MDM name), fallback `ComplianceGracePeriod` (GP name) | MDM then GP |
-| Grace period (feature) | `ConfigureDeadlineGracePeriodForFeatureUpdates` (MDM name), fallback `ComplianceGracePeriodForFU` (GP name) | MDM then GP |
+| Feature deadline | `ConfigureDeadlineForFeatureUpdates` at GP then MDM; fallback to `ComplianceDeadlineForFU` at GP | GP then MDM |
+| Quality deadline | `ConfigureDeadlineForQualityUpdates` at GP then MDM; fallback to `ComplianceDeadline` at GP | GP then MDM |
+| Grace period | `ConfigureDeadlineGracePeriod` at GP then MDM; fallback to `ComplianceGracePeriod` at GP | GP then MDM |
+| Grace period (feature) | `ConfigureDeadlineGracePeriodForFeatureUpdates` at GP then MDM; fallback to `ComplianceGracePeriodForFU` at GP | GP then MDM |
 | Channel targeting | `BranchReadinessLevel` | GP then MDM |
 | Preview build management | `ManagePreviewBuilds` | GP then MDM |
 | Driver exclusion | `ExcludeWUDriversInQualityUpdate` | GP then MDM |
@@ -76,7 +79,7 @@ The script collects indicators that the device is managed by WUfB. Any indicator
 | Authority | How detected |
 |-----------|-------------|
 | WSUS | `UseWUServer = 1` (AU subkey) AND `WUServer` exists (WU key) |
-| SCCM | `ccmexec` service running AND `HKLM:\SOFTWARE\Microsoft\CCM` exists |
+| SCCM | `ccmexec` service running AND `HKLM:\SOFTWARE\Microsoft\CCM` exists. Co-management check: if `CoManagementFlags` value 16 (bit position 4) is set, the WU workload is considered shifted to Intune and SCCM is cleared — device evaluated for WUfB indicators instead. |
 
 ### 4. Compliance Decision
 
@@ -86,7 +89,8 @@ The script collects indicators that the device is managed by WUfB. Any indicator
 | WUfB indicators present + WSUS, but PolicyDrivenSource directs updates to WU | **Compliant** (split-source) | 0 |
 | WSUS + WUfB indicators, but no PolicyDrivenSource override | **Non-compliant** (dual-scan risk) | 1 |
 | WSUS configured, no WUfB indicators | **Non-compliant** (WSUS managed) | 1 |
-| SCCM detected, no WUfB indicators | **Non-compliant** (SCCM managed) | 1 |
+| SCCM detected, WU workload not shifted to Intune | **Non-compliant** (SCCM managed) | 1 |
+| SCCM co-managed, WU workload shifted to Intune, but no WUfB indicators | **Non-compliant** (no WUfB policy) | 1 |
 | No indicators, no WSUS, no SCCM | **Non-compliant** (no policy, default WU) | 1 |
 
 ### Registry Paths
@@ -103,7 +107,7 @@ The remediation script **only removes blockers** — it does not set update poli
 
 | Step | Action | Details |
 |------|--------|---------|
-| 0 | SCCM guard | Skips if SCCM manages WU workload and co-management hasn't shifted it to Intune (CoManagementFlags bit 16) |
+| 0 | SCCM guard | Skips if SCCM manages WU workload and co-management hasn't shifted it to Intune (`CoManagementFlags` value 16, bit position 4) |
 | 1 | Remove WSUS config | `WUServer`, `WUStatusServer`, `DoNotConnectToWindowsUpdateInternetLocations`, `SetDisableUXWUAccess`, `UpdateServiceUrlAlternate`, `UseWUServer` |
 | 2 | Set PolicyDrivenSource | All 4 update types set to 0 (Windows Update) + `UseUpdateClassPolicySource = 1` |
 | 3 | Remove NoAutoUpdate | Removes `NoAutoUpdate = 1` if set |
