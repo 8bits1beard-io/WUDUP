@@ -2423,7 +2423,7 @@ function Show-ModificationMenu {
         Write-Host "    [0]  Exit" -ForegroundColor White
         Write-Host ""
 
-        $choice = Read-Host "    Enter choice"
+        $choice = (Read-Host "    Enter choice").ToUpper()
 
         switch ($choice) {
             '1' { Set-OSPin }
@@ -2434,21 +2434,13 @@ function Show-ModificationMenu {
             '6' { Set-PauseUpdates }
             '7' { Set-PauseUpdates -Unpause }
             'S' { Show-SwitchSourceMenu }
-            's' { Show-SwitchSourceMenu }
             'B' {
                 $backupFile = Backup-WUSettings -Reason 'manual'
                 Write-Host ""
                 Write-Host "  SUCCESS: Settings backed up to:" -ForegroundColor Green
                 Write-Host "  $backupFile" -ForegroundColor White
             }
-            'b' {
-                $backupFile = Backup-WUSettings -Reason 'manual'
-                Write-Host ""
-                Write-Host "  SUCCESS: Settings backed up to:" -ForegroundColor Green
-                Write-Host "  $backupFile" -ForegroundColor White
-            }
             'R' { Restore-WUSettings }
-            'r' { Restore-WUSettings }
             '8' {
                 $osInfo         = Get-OSInfo
                 $authority      = Get-ManagementAuthority
