@@ -479,12 +479,20 @@ function Get-ManagementAuthority {
         $wufbIndicators += 'QualityDeferral'
     }
 
-    # Version targeting -- requires both TargetReleaseVersion=1 AND TargetReleaseVersionInfo
+    # Version targeting
+    # GP path: TargetReleaseVersion=1 (DWORD enable flag) + TargetReleaseVersionInfo="24H2" (REG_SZ)
+    # MDM path: TargetReleaseVersion="24H2" (the version string itself, not a boolean)
     $targetVer = $gpValues['TargetReleaseVersion']
     if ($null -eq $targetVer) { $targetVer = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersion' }
     $targetVerInfo = $gpValues['TargetReleaseVersionInfo']
     if ($null -eq $targetVerInfo) { $targetVerInfo = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersionInfo' }
-    if ($targetVer -eq 1 -and $null -ne $targetVerInfo) { $wufbIndicators += 'VersionTargeting' }
+    if ($targetVer -eq 1 -and $null -ne $targetVerInfo) {
+        $wufbIndicators += 'VersionTargeting'
+    }
+    elseif ($null -ne $targetVer -and $targetVer -ne 0 -and $targetVer -ne 1) {
+        # MDM-style: TargetReleaseVersion IS the version string
+        $wufbIndicators += 'VersionTargeting'
+    }
 
     # Compliance deadlines -- check both Configure* (MDM) and Compliance* (GP) naming conventions
     $dlFeature = $gpValues['ConfigureDeadlineForFeatureUpdates']
@@ -611,9 +619,30 @@ function Get-ManagementAuthority {
 
 function Get-UpdatePolicies {
     # --- OS Version Pinning ---
+    # GP path: TargetReleaseVersion=1 (DWORD enable flag), TargetReleaseVersionInfo="24H2" (REG_SZ)
+    # MDM path: TargetReleaseVersion="24H2" (the version string itself, not a boolean)
     $targetEnabled = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'TargetReleaseVersion'
     $targetVersion = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'TargetReleaseVersionInfo'
     $productVersion = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ProductVersion'
+    $targetSource = 'GP'
+
+    # MDM fallback
+    if ($null -eq $targetEnabled) {
+        $targetEnabled = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersion'
+        $targetSource = 'MDM'
+    }
+    if ($null -eq $targetVersion) {
+        $targetVersion = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersionInfo'
+    }
+    if ($null -eq $productVersion) {
+        $productVersion = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ProductVersion'
+    }
+
+    # Normalize MDM-style: if TargetReleaseVersion is a version string (not 0/1), it IS the version
+    if ($null -ne $targetEnabled -and $targetEnabled -ne 0 -and $targetEnabled -ne 1) {
+        $targetVersion = $targetEnabled
+        $targetEnabled = 1
+    }
 
     # --- Update Source ---
     $wuServer = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'WUServer'

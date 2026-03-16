@@ -241,12 +241,19 @@ try {
     if ($null -ne $qualityDefer) { $indicators += "QualityDeferral: ${qualityDefer}d" }
 
     # --- 3. Version Targeting ---
+    # GP path: TargetReleaseVersion=1 (DWORD enable flag) + TargetReleaseVersionInfo="24H2" (REG_SZ)
+    # MDM path: TargetReleaseVersion="24H2" (the version string itself, not a boolean)
     $targetEnabled = Get-PolicyValue -Name 'TargetReleaseVersion'
     $targetVersion = Get-PolicyValue -Name 'TargetReleaseVersionInfo'
     $productVersion = Get-PolicyValue -Name 'ProductVersion'
 
     if ($targetEnabled -eq 1 -and $null -ne $targetVersion) {
+        # GP-style: enable flag + separate version string
         $indicators += "VersionPin: $productVersion $targetVersion"
+    }
+    elseif ($null -ne $targetEnabled -and $targetEnabled -ne 0 -and $targetEnabled -ne 1) {
+        # MDM-style: TargetReleaseVersion IS the version string (e.g. "24H2")
+        $indicators += "VersionPin: $productVersion $targetEnabled"
     }
 
     # --- 4. Compliance Deadlines ---

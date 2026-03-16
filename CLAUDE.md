@@ -46,7 +46,7 @@ All six blockers must be checked consistently across all three scripts:
 ### Shared WUfB Indicators (checked in Detect, checked in WUDUP Get-ManagementAuthority, displayed by WUDUP)
 - `SetPolicyDrivenUpdateSourceFor{Feature,Quality,Driver,Other}Updates` (value 0 = WU) — most definitive signal, requires `UseUpdateClassPolicySource=1` in AU subkey for direct registry writes
 - `DeferFeatureUpdatesPeriodInDays`, `DeferQualityUpdatesPeriodInDays` (max 365 / 30 respectively)
-- `TargetReleaseVersion` + `TargetReleaseVersionInfo` + `ProductVersion` — requires BOTH `TargetReleaseVersion=1` AND `TargetReleaseVersionInfo` non-null to count as indicator
+- `TargetReleaseVersion` + `TargetReleaseVersionInfo` + `ProductVersion` — GP stores `TargetReleaseVersion` as a DWORD enable flag (`1`/`0`) with `TargetReleaseVersionInfo` as the version string. MDM stores `TargetReleaseVersion` as the version string itself (e.g. `"24H2"`). Detection must handle both formats. WUDUP normalizes MDM-style to `TargetReleaseVersion=1` + `TargetReleaseVersionInfo="24H2"` in Get-UpdatePolicies.
 - Compliance deadlines: GP writes `ComplianceDeadlineForFU` / `ComplianceDeadline` / `ComplianceGracePeriod` / `ComplianceGracePeriodForFU`; MDM uses `ConfigureDeadlineFor{Feature,Quality}Updates` / `ConfigureDeadlineGracePeriod{,ForFeatureUpdates}` — detection must check both naming conventions
 - `BranchReadinessLevel` (legacy on Windows 11), `ManagePreviewBuilds`
 - `ExcludeWUDriversInQualityUpdate`
