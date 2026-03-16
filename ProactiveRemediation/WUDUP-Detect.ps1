@@ -48,25 +48,23 @@
 #  CONFIGURATION
 # ============================================================================
 
-# Update Ring enforcement: set to $true to require an Intune WUfB Update Ring
-# to be actively delivering policy. When $false (default), the device is
-# compliant as long as WUfB indicators exist (including remediation-set
-# PolicyDrivenSource keys). When $true, the device must also have WUfB policy
-# values delivered by an active Intune enrollment — otherwise it reports
-# non-compliant even if pointed at Windows Update.
-$Config_RequireUpdateRing = $false
+# Update Ring enforcement: requires an Intune WUfB Update Ring to be actively
+# delivering policy. Devices with only remediation-set PolicyDrivenSource keys
+# (no actual Update Ring) will report non-compliant. Set to $false if you only
+# need to verify the device is pointed at WU, not that an Update Ring is assigned.
+$Config_RequireUpdateRing = $true
 
-# MDM enrollment enforcement: set to $true to require an active Intune MDM
-# enrollment. When $true, devices without a healthy MDM enrollment report
-# non-compliant. Remediation cannot fix this — manual re-enrollment is needed.
-$Config_RequireMDMEnrollment = $false
+# MDM enrollment enforcement: requires an active Intune MDM enrollment
+# (EnrollmentState=1). Devices without a healthy enrollment cannot receive
+# WUfB policy from Intune. Remediation cannot fix this — manual re-enrollment
+# is needed. Set to $false if devices may receive WUfB policy via GPO instead.
+$Config_RequireMDMEnrollment = $true
 
 # Maximum days since last successful Windows Update scan before flagging
-# non-compliant. Set to 0 to disable this check. When the WU client hasn't
-# scanned within this window, the device may not be receiving updates even if
-# configured correctly. Remediation cannot fix stale scans — manual
-# investigation is needed.
-$Config_MaxScanAgeDays = 0
+# non-compliant. When the WU client hasn't scanned within this window, the
+# device may not be receiving updates even if configured correctly. Remediation
+# cannot fix stale scans — manual investigation is needed. Set to 0 to disable.
+$Config_MaxScanAgeDays = 7
 
 # ============================================================================
 #  REGISTRY PATHS

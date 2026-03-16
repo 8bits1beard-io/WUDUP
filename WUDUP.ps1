@@ -159,6 +159,53 @@ function Test-ActiveMDMEnrollment {
     return $null
 }
 
+# Checks whether an active MDM enrollment is delivering WUfB Update policy.
+# Looks in PolicyManager\Providers\<EnrollmentGUID>\default\device\Update for
+# WUfB-specific values (deferrals, deadlines, version targeting) that indicate
+# an Update Ring assignment. Recognizes both direct Intune and SCCM co-management bridge.
+function Test-UpdateRingDelivered {
+    if (-not (Test-Path $script:RegPath_Enrollments)) { return $null }
+
+    $mdmProviders = @('MS DM Server', 'WMI_Bridge_SCCM_Server')
+    $wufbValueNames = @(
+        'DeferFeatureUpdatesPeriodInDays', 'DeferQualityUpdatesPeriodInDays',
+        'ConfigureDeadlineForFeatureUpdates', 'ConfigureDeadlineForQualityUpdates',
+        'ConfigureDeadlineGracePeriod', 'ConfigureDeadlineGracePeriodForFeatureUpdates',
+        'TargetReleaseVersion', 'TargetReleaseVersionInfo', 'ProductVersion',
+        'BranchReadinessLevel', 'ExcludeWUDriversInQualityUpdate', 'ManagePreviewBuilds'
+    )
+
+    try {
+        $enrollments = Get-ChildItem -Path $script:RegPath_Enrollments -ErrorAction SilentlyContinue
+        foreach ($enrollment in $enrollments) {
+            $providerID = Get-SafeRegistryValue -Path $enrollment.PSPath -Name 'ProviderID'
+            if ($providerID -notin $mdmProviders) { continue }
+
+            $guid = $enrollment.PSChildName
+            $mdmUpdatePath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$guid\default\device\Update"
+            if (-not (Test-Path $mdmUpdatePath)) { continue }
+
+            foreach ($valName in $wufbValueNames) {
+                $val = Get-SafeRegistryValue -Path $mdmUpdatePath -Name $valName
+                if ($null -ne $val) {
+                    return [PSCustomObject]@{
+                        Delivered = $true
+                        Provider  = $providerID
+                        GUID      = $guid
+                    }
+                }
+            }
+        }
+    }
+    catch { }
+
+    return [PSCustomObject]@{
+        Delivered = $false
+        Provider  = $null
+        GUID      = $null
+    }
+}
+
 function Get-WUServiceState {
     $result = [PSCustomObject]@{
         Status         = 'Unknown'
@@ -901,6 +948,18 @@ function Show-UpdateReport {
 
     if ($null -ne $Authority.MDMProvider) {
         Write-ReportLine "MDM Provider" $Authority.MDMProvider 'White'
+    }
+
+    # WUfB verification: is an Update Ring actually delivering policy?
+    if ($Authority.IsWUfB -or $Authority.IsMDMManaged -or ($Authority.IsCoManaged -and $Authority.Authority -like '*via Intune*')) {
+        $ringCheck = Test-UpdateRingDelivered
+        if ($ringCheck.Delivered) {
+            $providerLabel = if ($ringCheck.Provider -eq 'WMI_Bridge_SCCM_Server') { 'via co-mgmt bridge' } else { 'via Intune' }
+            Write-ReportLine "Update Ring" "Active ($providerLabel)" 'Green'
+        }
+        else {
+            Write-ReportLine "Update Ring" "Not detected - no WUfB policy delivered by MDM" 'Red'
+        }
     }
 
     if (-not $Authority.CanModify) {
@@ -2546,6 +2605,7 @@ $serviceState   = Get-WUServiceState
 $updateStatus   = Get-UpdateStatus
 $updateHistory  = Get-RecentUpdateHistory
 $updateServices = Get-RegisteredUpdateServices
+$updateRing     = Test-UpdateRingDelivered
 
 if ($Report) {
     # Structured output for automation
@@ -2559,6 +2619,7 @@ if ($Report) {
         UpdateStatus       = $updateStatus
         UpdateHistory      = $updateHistory
         RegisteredServices = $updateServices
+        UpdateRing         = $updateRing
     }
     exit 0
 }

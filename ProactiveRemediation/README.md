@@ -162,9 +162,9 @@ The remediation script **only removes blockers** — it does not set update poli
 $Config_AllowOnSCCM = $false   # $true to force remediation on SCCM-managed devices
 
 # --- WUDUP-Detect.ps1 ---
-$Config_RequireUpdateRing = $false    # $true to require Intune/co-mgmt Update Ring delivery
-$Config_RequireMDMEnrollment = $false # $true to require active MDM enrollment
-$Config_MaxScanAgeDays = 0            # Max days since last WU scan (0 = disabled)
+$Config_RequireUpdateRing = $true      # $false to skip Update Ring delivery check
+$Config_RequireMDMEnrollment = $true  # $false to skip MDM enrollment check
+$Config_MaxScanAgeDays = 7            # Max days since last WU scan (0 = disabled)
 ```
 
 ## Deployment in Intune
