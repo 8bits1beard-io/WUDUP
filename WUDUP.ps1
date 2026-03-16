@@ -330,6 +330,7 @@ function Get-ManagementAuthority {
         CanModify     = $true
         MDMProvider   = $null
         AutoUpdateDisabled = $false
+        Blockers      = @()
     }
 
     # Check SCCM/ConfigMgr
@@ -490,18 +491,39 @@ function Get-ManagementAuthority {
                                       $srcOther_GP -eq 0 -or $srcOther_MDM -eq 0))
     $result.IsSplitSource = $isSplitSource
 
-    # NoAutoUpdate=1 disables all updates -- disqualifies WUfB regardless of indicators
+    # Update blocker checks -- matches PR detect logic
+    $blockers = @()
+
     $noAutoUpdate = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
-    $result.AutoUpdateDisabled = ($noAutoUpdate -eq 1)
+    if ($noAutoUpdate -eq 1) { $blockers += 'NoAutoUpdate=1' }
+
+    $auOptionsCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'AUOptions'
+    if ($auOptionsCurrent -eq 1) { $blockers += 'AUOptions=1 (Never check)' }
+
+    $noConnect = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DoNotConnectToWindowsUpdateInternetLocations'
+    if ($noConnect -eq 1) { $blockers += 'DoNotConnectToWindowsUpdateInternetLocations=1' }
+
+    $disableUX = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetDisableUXWUAccess'
+    if ($disableUX -eq 1) { $blockers += 'SetDisableUXWUAccess=1' }
+
+    $wuSvc = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
+    if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') { $blockers += 'wuauserv service Disabled' }
+
+    $usoSvc = Get-Service -Name 'UsoSvc' -ErrorAction SilentlyContinue
+    if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') { $blockers += 'UsoSvc service Disabled' }
+
+    $result.Blockers = $blockers
+    $result.AutoUpdateDisabled = ($blockers.Count -gt 0)
 
     # Classify: GPO with WUfB indicators, GPO without, WSUS with split-source, or Local
     if ($result.Authority -eq 'Local' -or $result.Authority -eq 'MDM (stale?)') {
         $auValues = Get-AllRegistryValues -Path $script:RegPath_AU
-        if ($noAutoUpdate -eq 1) {
-            # Auto-updates disabled -- WUfB can't function even if indicators exist
+        if ($blockers.Count -gt 0) {
+            # Blockers detected -- WUfB can't function even if indicators exist
             if (-not $result.IsSCCMManaged -and -not $result.IsMDMManaged) {
-                $result.Authority = 'Disabled (NoAutoUpdate)'
-                $result.Details = 'Automatic updates are disabled -- WUfB policies cannot take effect'
+                $blockerDetail = $blockers -join '; '
+                $result.Authority = "Disabled ($blockerDetail)"
+                $result.Details = "Update blockers detected -- WUfB policies cannot take effect"
                 $result.IsWUfB = $false
             }
         }
@@ -2120,10 +2142,15 @@ function Switch-ToWUfB {
     $toSet += @{ Path = $script:RegPath_WU; Name = 'DeferQualityUpdatesPeriodInDays'; Value = $qualityDays; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_AU; Name = 'AUOptions'; Value = $auOption; Type = 'DWord' }
 
-    # Remove NoAutoUpdate if set (blocker for WUfB)
+    # Remove update-disabling blockers (matches PR remediate logic)
     $noAutoUpdateCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
     if ($noAutoUpdateCurrent -eq 1) {
         $toRemove += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate' }
+    }
+    # AUOptions=1 means "Never check" -- remove it so the user-chosen value takes effect
+    $auOptionsCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'AUOptions'
+    if ($auOptionsCurrent -eq 1) {
+        $toRemove += @{ Path = $script:RegPath_AU; Name = 'AUOptions' }
     }
 
     # Compliance deadlines
@@ -2168,6 +2195,16 @@ function Switch-ToWUfB {
             }
             else {
                 New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType String -Force | Out-Null
+            }
+        }
+
+        # Re-enable Windows Update services if disabled (matches PR remediate logic)
+        $svcNames = @('wuauserv', 'UsoSvc')
+        foreach ($svcName in $svcNames) {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($null -ne $svc -and $svc.StartType -eq 'Disabled') {
+                Set-Service -Name $svcName -StartupType Manual -ErrorAction SilentlyContinue
+                Write-Host "  Re-enabled $svcName service (was Disabled)" -ForegroundColor Yellow
             }
         }
 
@@ -2241,10 +2278,14 @@ function Switch-ToWSUS {
         return
     }
 
-    # Remove NoAutoUpdate rather than writing 0 -- "not configured" requires the value to not exist
+    # Remove update-disabling blockers
     $noAutoUpdateCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
     if ($noAutoUpdateCurrent -eq 1) {
         $toRemove += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate' }
+    }
+    $auOptionsCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'AUOptions'
+    if ($auOptionsCurrent -eq 1) {
+        $toRemove += @{ Path = $script:RegPath_AU; Name = 'AUOptions' }
     }
     $toSet += @{ Path = $script:RegPath_AU; Name = 'AUOptions'; Value = $auOption; Type = 'DWord' }
 
@@ -2273,6 +2314,16 @@ function Switch-ToWSUS {
             }
             else {
                 New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType String -Force | Out-Null
+            }
+        }
+
+        # Re-enable Windows Update services if disabled
+        $svcNames = @('wuauserv', 'UsoSvc')
+        foreach ($svcName in $svcNames) {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($null -ne $svc -and $svc.StartType -eq 'Disabled') {
+                Set-Service -Name $svcName -StartupType Manual -ErrorAction SilentlyContinue
+                Write-Host "  Re-enabled $svcName service (was Disabled)" -ForegroundColor Yellow
             }
         }
 
@@ -2324,6 +2375,16 @@ function Switch-ToMicrosoftUpdate {
         foreach ($item in $toRemove) {
             if (Test-Path $item.Path) {
                 Remove-ItemProperty -Path $item.Path -Name $item.Name -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Re-enable Windows Update services if disabled
+        $svcNames = @('wuauserv', 'UsoSvc')
+        foreach ($svcName in $svcNames) {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($null -ne $svc -and $svc.StartType -eq 'Disabled') {
+                Set-Service -Name $svcName -StartupType Manual -ErrorAction SilentlyContinue
+                Write-Host "  Re-enabled $svcName service (was Disabled)" -ForegroundColor Yellow
             }
         }
 
