@@ -55,8 +55,8 @@ The `-Report` switch suppresses all interactive output and returns a single `PSC
 
 The [`ProactiveRemediation/`](ProactiveRemediation/) folder contains a detect + remediate script pair for ensuring devices are managed by WUfB.
 
-- **Detection** checks for WUfB indicators (PolicyDrivenSource, deferrals, deadlines, version targeting, etc.) and blockers (`NoAutoUpdate`, WSUS, SCCM)
-- **Remediation** only removes blockers — it does not set update policies (those come from your Intune WUfB Update Ring)
+- **Detection** checks for 6 blocker conditions, collects WUfB indicators (PolicyDrivenSource, deferrals, deadlines, version targeting, etc.), detects WSUS/SCCM/co-management, and optionally validates Update Ring delivery, MDM enrollment health, and WU scan freshness
+- **Remediation** removes blockers (WSUS config, `NoAutoUpdate`, `AUOptions=1`, disabled services) and sets PolicyDrivenSource — it does not set update policies (those come from your Intune WUfB Update Ring)
 
 See the [ProactiveRemediation README](ProactiveRemediation/README.md) for full detection logic, remediation actions, and deployment instructions.
 
