@@ -23,9 +23,12 @@ WUDUP (Windows Update Dashboard: Unified Provisioning) is a PowerShell-based too
 - Checks 6 blocker conditions, collects WUfB indicators, validates management channel health
 - Opt-in config flags: `$Config_RequireUpdateRing`, `$Config_RequireMDMEnrollment`, `$Config_MaxScanAgeDays`
 
-### ProactiveRemediation/WUDUP-Remediate.ps1 (~215 lines) — Intune Proactive Remediation
+### ProactiveRemediation/WUDUP-Remediate.ps1 (~250 lines) — Intune Proactive Remediation
 - Non-interactive, runs as SYSTEM
-- Only removes blockers (WSUS config, stale pauses, disabled services) and sets PolicyDrivenSource keys
+- Stops WU services before changes, restarts after — prevents cached state from persisting
+- Removes blockers (WSUS config, stale pauses, disabled services) and sets PolicyDrivenSource keys
+- Clears WU client internal caches (UpdatePolicy, SoftwareDistribution) to force fresh state
+- Triggers Intune policy re-sync (PushLaunch) + WU scan after changes
 - Does NOT set update policies (deferrals, deadlines, version pins) — those come from Intune Update Rings
 - Includes SCCM co-management guard (CoManagementFlags value 16 (bit position 4))
 - Exit 0 = success, Exit 1 = failure
@@ -79,6 +82,10 @@ SCCM (with co-management check) → MDM/Intune (with enrollment verification) �
 - **WUfB cleanup** (when switching to WSUS): all WUfB indicator values (including both `Configure*` and `Compliance*` deadline names, version targeting keys) + `UseUpdateClassPolicySource`
 
 ### Post-Switch Actions (must be consistent)
+- **Service stop/start** — WUDUP-Remediate.ps1 stops `wuauserv`, `bits`, `UsoSvc` before changes and restarts after to prevent cached state. WUDUP.ps1 Switch-To functions do not stop/start (interactive context, user can restart manually).
+- **UpdatePolicy cache clear** — `HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy` stores the WU client's resolved policy state. WUDUP-Remediate.ps1 deletes this tree; Intune re-sync rebuilds it. Critical for fixing "Offer Ready" stalls.
+- **SoftwareDistribution clear** — `%SystemRoot%\SoftwareDistribution` is the WU client's download/scan database. WUDUP-Remediate.ps1 deletes it to force fresh scan state. Services must be stopped first or files are locked.
+- **Intune re-sync** — WUDUP-Remediate.ps1 triggers the `PushLaunch` scheduled task to force Intune to re-deliver policies immediately after cache clearing.
 - `usoclient StartScan` — triggered after source switching in both WUDUP.ps1 and WUDUP-Remediate.ps1
 - `NoAutoUpdate` and `AUOptions=1` removal — all scripts remove these (not set to 0) when switching sources
 - Service re-enabling — `wuauserv` and `UsoSvc` set to `Manual` if `Disabled`, in all Switch-To functions and WUDUP-Remediate.ps1

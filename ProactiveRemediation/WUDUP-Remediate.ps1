@@ -13,19 +13,22 @@
 
     Actions:
     1. Checks for SCCM — warns and exits if WU workload is not shifted
-    2. Removes WSUS configuration (WUServer, WUStatusServer, UseWUServer, etc.)
-    3. Sets PolicyDrivenUpdateSource keys to direct all updates to Windows Update
-    4. Removes NoAutoUpdate and AUOptions=1 if set (re-enables automatic updates)
-    5. Cleans stale pause entries
-    6. Re-enables Windows Update (wuauserv) and Update Orchestrator (UsoSvc) services if disabled
-    7. Triggers policy scan for immediate pickup
+    2. Stops WU-related services (wuauserv, bits, usosvc) to prevent cached state
+    3. Removes WSUS configuration (WUServer, WUStatusServer, UseWUServer, etc.)
+    4. Sets PolicyDrivenUpdateSource keys to direct all updates to Windows Update
+    5. Removes NoAutoUpdate and AUOptions=1 if set (re-enables automatic updates)
+    6. Cleans stale pause entries
+    7. Clears WU client internal policy cache (UpdatePolicy)
+    8. Clears SoftwareDistribution folder (forces fresh scan state)
+    9. Re-enables Windows Update (wuauserv) and Update Orchestrator (UsoSvc) services if disabled
+    10. Starts services and triggers Intune re-sync + WU scan
 
     Exit 0 = Remediation succeeded
     Exit 1 = Remediation failed
 
 .NOTES
     Author:  Joshua Walderbach
-    Tool:    WUDUP Remediation v1.5.0
+    Tool:    WUDUP Remediation v2.0.0
     Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
@@ -124,7 +127,18 @@ try {
         }
     }
 
-    # --- Step 1: Remove WSUS configuration ---
+    # --- Step 1: Stop WU-related services before making changes ---
+    # Prevents cached in-memory state from overriding registry changes
+    $stopServices = @('wuauserv', 'bits', 'UsoSvc')
+    foreach ($svcName in $stopServices) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($null -ne $svc -and $svc.Status -eq 'Running') {
+            Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $changes += 'Stopped WU services'
+
+    # --- Step 2: Remove WSUS configuration ---
     $wsusValues = @(
         @{ Path = $RegPath_WU; Name = 'WUServer' },
         @{ Path = $RegPath_WU; Name = 'WUStatusServer' },
@@ -142,7 +156,7 @@ try {
         }
     }
 
-    # --- Step 2: Set PolicyDrivenUpdateSource (Windows 10 2004+ / Windows 11) ---
+    # --- Step 3: Set PolicyDrivenUpdateSource (Windows 10 2004+ / Windows 11) ---
     $sourceKeys = @(
         'SetPolicyDrivenUpdateSourceForFeatureUpdates',
         'SetPolicyDrivenUpdateSourceForQualityUpdates',
@@ -157,7 +171,7 @@ try {
     Set-RegDWord -Path $RegPath_AU -Name 'UseUpdateClassPolicySource' -Value 1
     $changes += 'Set PolicyDrivenUpdateSource (all types -> WU)'
 
-    # --- Step 3: Remove update-disabling registry values ---
+    # --- Step 4: Remove update-disabling registry values ---
     $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
     if ($noAutoUpdate -eq 1) {
         Remove-RegValue -Path $RegPath_AU -Name 'NoAutoUpdate'
@@ -170,7 +184,7 @@ try {
         $changes += 'Removed AUOptions=1 (Never check)'
     }
 
-    # --- Step 4: Clean up stale pause entries ---
+    # --- Step 5: Clean up stale pause entries ---
     $pauseValues = @(
         'PauseFeatureUpdates', 'PauseFeatureUpdatesStartTime', 'PauseFeatureUpdatesEndTime',
         'PauseQualityUpdates', 'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime'
@@ -179,7 +193,25 @@ try {
         Remove-RegValue -Path $RegPath_WU -Name $v
     }
 
-    # --- Step 5: Re-enable Windows Update services if disabled ---
+    # --- Step 6: Clear WU client internal policy cache ---
+    # The UpdatePolicy path stores the WU client's resolved policy state. Stale entries
+    # here cause the client to ignore registry policy changes. Intune re-sync rebuilds it.
+    $updatePolicyPath = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy'
+    if (Test-Path $updatePolicyPath) {
+        Remove-Item -Path $updatePolicyPath -Recurse -Force -ErrorAction SilentlyContinue
+        $changes += 'Cleared UpdatePolicy cache'
+    }
+
+    # --- Step 7: Clear SoftwareDistribution folder ---
+    # Forces a fresh scan state and rebuilds the WU client database. Services must be
+    # stopped first (Step 1) or files will be locked.
+    $sdPath = "$env:SystemRoot\SoftwareDistribution"
+    if (Test-Path $sdPath) {
+        Remove-Item -Path $sdPath -Recurse -Force -ErrorAction SilentlyContinue
+        $changes += 'Cleared SoftwareDistribution'
+    }
+
+    # --- Step 8: Re-enable Windows Update services if disabled ---
     $svcNames = @('wuauserv', 'UsoSvc')
     foreach ($svcName in $svcNames) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
@@ -189,19 +221,32 @@ try {
         }
     }
 
-    # --- Step 6: Trigger scan to pick up new policies ---
+    # --- Step 9: Start services and trigger policy re-sync ---
+    # Start services back up so they read fresh registry state
+    foreach ($svcName in $stopServices) {
+        Start-Service -Name $svcName -ErrorAction SilentlyContinue
+    }
+    $changes += 'Started WU services'
+
+    # Trigger Intune to re-deliver policies (rebuilds PolicyManager entries)
+    $pushTask = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -eq 'PushLaunch' }
+    if ($null -ne $pushTask) {
+        Start-ScheduledTask -InputObject $pushTask -ErrorAction SilentlyContinue
+        $changes += 'Triggered Intune policy re-sync (PushLaunch)'
+    }
+
+    # Trigger WU scan via usoclient
     try {
         Start-Process -FilePath 'usoclient' -ArgumentList 'StartScan' -NoNewWindow -Wait -ErrorAction Stop
-        $changes += 'Triggered policy scan'
+        $changes += 'Triggered WU scan'
     }
     catch {
-        # Non-fatal: scan will happen on next cycle
-        $changes += 'Scan trigger skipped (UsoClient unavailable)'
+        $changes += 'WU scan trigger skipped (UsoClient unavailable)'
     }
 
     # --- Done ---
     $summary = $changes -join '; '
-    $msg = "REMEDIATED: Blockers removed, device ready for WUfB policy. $summary"
+    $msg = "REMEDIATED: Blockers removed, WU state reset, device ready for WUfB policy. $summary"
     Write-Log $msg
     Write-Output $msg
     exit 0

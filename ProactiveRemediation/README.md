@@ -148,12 +148,15 @@ The remediation script **only removes blockers** — it does not set update poli
 | Step | Action | Details |
 |------|--------|---------|
 | 0 | SCCM guard | Skips if SCCM manages WU workload and co-management hasn't shifted it to Intune (`CoManagementFlags` value 16, bit position 4) |
-| 1 | Remove WSUS config | `WUServer`, `WUStatusServer`, `DoNotConnectToWindowsUpdateInternetLocations`, `SetDisableUXWUAccess`, `UpdateServiceUrlAlternate`, `UseWUServer` |
-| 2 | Set PolicyDrivenSource | All 4 update types set to 0 (Windows Update) + `UseUpdateClassPolicySource = 1` |
-| 3 | Remove update-disabling values | `NoAutoUpdate = 1` and `AUOptions = 1` removed if set |
-| 4 | Clean stale pauses | `PauseFeatureUpdates`, `PauseQualityUpdates` + their start/end timestamps |
-| 5 | Re-enable WU services | `wuauserv` and `UsoSvc` set to `Manual` startup if `Disabled` |
-| 6 | Trigger policy scan | `usoclient StartScan` (non-fatal if unavailable) |
+| 1 | Stop WU services | Stops `wuauserv`, `bits`, `UsoSvc` to prevent cached in-memory state from overriding registry changes |
+| 2 | Remove WSUS config | `WUServer`, `WUStatusServer`, `DoNotConnectToWindowsUpdateInternetLocations`, `SetDisableUXWUAccess`, `UpdateServiceUrlAlternate`, `UseWUServer` |
+| 3 | Set PolicyDrivenSource | All 4 update types set to 0 (Windows Update) + `UseUpdateClassPolicySource = 1` |
+| 4 | Remove update-disabling values | `NoAutoUpdate = 1` and `AUOptions = 1` removed if set |
+| 5 | Clean stale pauses | `PauseFeatureUpdates`, `PauseQualityUpdates` + their start/end timestamps |
+| 6 | Clear UpdatePolicy cache | Removes `HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy` — the WU client's internal resolved policy state. Stale entries here cause the client to ignore policy changes. |
+| 7 | Clear SoftwareDistribution | Removes `%SystemRoot%\SoftwareDistribution` — forces fresh scan state and database rebuild |
+| 8 | Re-enable WU services | `wuauserv` and `UsoSvc` set to `Manual` startup if `Disabled` |
+| 9 | Start services + re-sync | Starts WU services, triggers Intune `PushLaunch` task for policy re-delivery, then `usoclient StartScan` |
 
 ## Configuration
 
