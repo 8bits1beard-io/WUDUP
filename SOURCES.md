@@ -156,7 +156,7 @@ Each MDM enrollment creates a GUID-named subkey. Enumerated to detect active enr
 | Value Name | Type | Description |
 |---|---|---|
 | `EnrollmentState` | DWORD | `1`=actively enrolled, `0`=not enrolled, `2`=enrollment requested, `3`=unenrollment requested. |
-| `ProviderID` | REG_SZ | MDM provider identifier. `MS DM Server` = Intune. |
+| `ProviderID` | REG_SZ | MDM provider identifier. `MS DM Server` = direct Intune enrollment. `WMI_Bridge_SCCM_Server` = SCCM co-management bridge (policies delivered via Intune through co-management). |
 
 An active enrollment is `EnrollmentState=1` with a non-empty `ProviderID`. Used to distinguish live MDM management from stale/orphaned PolicyManager entries.
 

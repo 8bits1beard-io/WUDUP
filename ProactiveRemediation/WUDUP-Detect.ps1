@@ -112,10 +112,16 @@ function Get-PolicyValue {
     return Get-SafeRegistryValue -Path $RegPath_MDM -Name $Name
 }
 
-# Checks whether an active Intune enrollment is delivering WUfB Update policy.
+# MDM provider IDs that deliver WUfB policy. 'MS DM Server' = direct Intune
+# enrollment. 'WMI_Bridge_SCCM_Server' = SCCM co-management bridge (policies
+# delivered via Intune through the co-management channel).
+$MDMProviderIDs = @('MS DM Server', 'WMI_Bridge_SCCM_Server')
+
+# Checks whether an active MDM enrollment is delivering WUfB Update policy.
 # Looks in PolicyManager\Providers\<EnrollmentGUID>\default\device\Update for
 # WUfB-specific values (deferrals, deadlines, version targeting) that indicate
 # an Update Ring assignment — not just PolicyDrivenSource keys from remediation.
+# Recognizes both direct Intune and SCCM co-management bridge enrollments.
 function Test-IntuneUpdateRingDelivered {
     $enrollPath = 'HKLM:\SOFTWARE\Microsoft\Enrollments'
     if (-not (Test-Path $enrollPath)) { return $false }
@@ -138,7 +144,7 @@ function Test-IntuneUpdateRingDelivered {
     $enrollments = Get-ChildItem -Path $enrollPath -ErrorAction SilentlyContinue
     foreach ($enrollment in $enrollments) {
         $providerID = Get-SafeRegistryValue -Path $enrollment.PSPath -Name 'ProviderID'
-        if ($providerID -ne 'MS DM Server') { continue }
+        if ($providerID -notin $MDMProviderIDs) { continue }
 
         $guid = $enrollment.PSChildName
         $mdmUpdatePath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$guid\default\device\Update"
@@ -153,19 +159,21 @@ function Test-IntuneUpdateRingDelivered {
     return $false
 }
 
-# Checks for a healthy Intune MDM enrollment. Returns a hashtable with:
-#   Enrolled = $true/$false   — whether an active Intune enrollment exists
-#   UPN      = string|$null   — the enrolled user's UPN (if found)
-#   GUID     = string|$null   — the enrollment GUID
+# Checks for a healthy MDM enrollment (Intune or co-management bridge).
+# Returns a hashtable with:
+#   Enrolled  = $true/$false   — whether an active MDM enrollment exists
+#   UPN       = string|$null   — the enrolled user's UPN (if found)
+#   GUID      = string|$null   — the enrollment GUID
+#   Provider  = string|$null   — the ProviderID (e.g. 'MS DM Server' or 'WMI_Bridge_SCCM_Server')
 function Test-MDMEnrollmentHealth {
-    $result = @{ Enrolled = $false; UPN = $null; GUID = $null }
+    $result = @{ Enrolled = $false; UPN = $null; GUID = $null; Provider = $null }
     $enrollPath = 'HKLM:\SOFTWARE\Microsoft\Enrollments'
     if (-not (Test-Path $enrollPath)) { return $result }
 
     $enrollments = Get-ChildItem -Path $enrollPath -ErrorAction SilentlyContinue
     foreach ($enrollment in $enrollments) {
         $providerID = Get-SafeRegistryValue -Path $enrollment.PSPath -Name 'ProviderID'
-        if ($providerID -ne 'MS DM Server') { continue }
+        if ($providerID -notin $MDMProviderIDs) { continue }
 
         $enrollState = Get-SafeRegistryValue -Path $enrollment.PSPath -Name 'EnrollmentState'
         # EnrollmentState 1 = enrolled and active
@@ -174,6 +182,7 @@ function Test-MDMEnrollmentHealth {
         $result.Enrolled = $true
         $result.UPN = Get-SafeRegistryValue -Path $enrollment.PSPath -Name 'UPN'
         $result.GUID = $enrollment.PSChildName
+        $result.Provider = $providerID
         return $result
     }
 
@@ -376,7 +385,8 @@ try {
             exit 1
         }
         if ($mdmHealth.Enrolled) {
-            $healthWarnings += "MDM: Enrolled ($($mdmHealth.UPN))"
+            $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-mgmt bridge' } else { 'Intune' }
+            $healthWarnings += "MDM: Enrolled via $providerLabel ($($mdmHealth.UPN))"
         }
         else {
             $healthWarnings += 'MDM: Not enrolled'
