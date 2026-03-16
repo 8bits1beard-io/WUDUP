@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     WUDUP - Windows Update Dashboard: Unified Provisioning
@@ -182,7 +182,7 @@ function Get-WUServiceState {
 }
 
 function Get-UpdateStatus {
-    # Primary: COM API — same source the Settings app uses
+    # Primary: COM API -- same source the Settings app uses
     $rebootCOM = $false
     try {
         $sysInfo = New-Object -ComObject Microsoft.Update.SystemInfo
@@ -197,7 +197,7 @@ function Get-UpdateStatus {
     $lastInstall = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Install" -Name 'LastSuccessTime'
     $lastDetect  = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Detect" -Name 'LastSuccessTime'
     return [PSCustomObject]@{
-        RebootRequired      = $rebootCOM      # Authoritative — matches Settings app
+        RebootRequired      = $rebootCOM      # Authoritative -- matches Settings app
         RebootRequiredWUReg = $rebootWUReg     # WU registry flag (supplemental)
         RebootRequiredCBS   = $rebootCBS       # CBS flag (often stale)
         LastInstallTime     = $lastInstall
@@ -337,7 +337,7 @@ function Get-ManagementAuthority {
     $ccmKey = Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'
     $sccmDetected = ($null -ne $sccmService -and $ccmKey)
 
-    # Check co-management — is the WU workload shifted to Intune?
+    # Check co-management -- is the WU workload shifted to Intune?
     $coMgmtWUShifted = $false
     if ($sccmDetected) {
         $coMgmtFlags = Get-SafeRegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\CCM' -Name 'CoManagementFlags'
@@ -372,7 +372,7 @@ function Get-ManagementAuthority {
         }
     }
 
-    # Check MDM/Intune — verify active enrollment before trusting PolicyManager values
+    # Check MDM/Intune -- verify active enrollment before trusting PolicyManager values
     $mdmValues = Get-AllRegistryValues -Path $script:RegPath_MDM
     $mdmProvider = Test-ActiveMDMEnrollment
     if ($mdmValues.Count -gt 0) {
@@ -386,10 +386,10 @@ function Get-ManagementAuthority {
             }
         }
         else {
-            # MDM policy keys exist but no active enrollment — likely stale
+            # MDM policy keys exist but no active enrollment -- likely stale
             if (-not $result.IsSCCMManaged) {
                 $result.Authority = 'MDM (stale?)'
-                $result.Details = 'MDM policy keys found but no active enrollment detected — may be leftover'
+                $result.Details = 'MDM policy keys found but no active enrollment detected -- may be leftover'
                 $result.IsMDMManaged = $true
                 $result.CanModify = $true
             }
@@ -431,14 +431,14 @@ function Get-ManagementAuthority {
         $wufbIndicators += 'QualityDeferral'
     }
 
-    # Version targeting — requires both TargetReleaseVersion=1 AND TargetReleaseVersionInfo
+    # Version targeting -- requires both TargetReleaseVersion=1 AND TargetReleaseVersionInfo
     $targetVer = $gpValues['TargetReleaseVersion']
     if ($null -eq $targetVer) { $targetVer = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersion' }
     $targetVerInfo = $gpValues['TargetReleaseVersionInfo']
     if ($null -eq $targetVerInfo) { $targetVerInfo = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'TargetReleaseVersionInfo' }
     if ($targetVer -eq 1 -and $null -ne $targetVerInfo) { $wufbIndicators += 'VersionTargeting' }
 
-    # Compliance deadlines — check both Configure* (MDM) and Compliance* (GP) naming conventions
+    # Compliance deadlines -- check both Configure* (MDM) and Compliance* (GP) naming conventions
     $dlFeature = $gpValues['ConfigureDeadlineForFeatureUpdates']
     if ($null -eq $dlFeature) { $dlFeature = $gpValues['ComplianceDeadlineForFU'] }
     if ($null -eq $dlFeature) { $dlFeature = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates' }
@@ -490,7 +490,7 @@ function Get-ManagementAuthority {
                                       $srcOther_GP -eq 0 -or $srcOther_MDM -eq 0))
     $result.IsSplitSource = $isSplitSource
 
-    # NoAutoUpdate=1 disables all updates — disqualifies WUfB regardless of indicators
+    # NoAutoUpdate=1 disables all updates -- disqualifies WUfB regardless of indicators
     $noAutoUpdate = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
     $result.AutoUpdateDisabled = ($noAutoUpdate -eq 1)
 
@@ -498,10 +498,10 @@ function Get-ManagementAuthority {
     if ($result.Authority -eq 'Local' -or $result.Authority -eq 'MDM (stale?)') {
         $auValues = Get-AllRegistryValues -Path $script:RegPath_AU
         if ($noAutoUpdate -eq 1) {
-            # Auto-updates disabled — WUfB can't function even if indicators exist
+            # Auto-updates disabled -- WUfB can't function even if indicators exist
             if (-not $result.IsSCCMManaged -and -not $result.IsMDMManaged) {
                 $result.Authority = 'Disabled (NoAutoUpdate)'
-                $result.Details = 'Automatic updates are disabled — WUfB policies cannot take effect'
+                $result.Details = 'Automatic updates are disabled -- WUfB policies cannot take effect'
                 $result.IsWUfB = $false
             }
         }
@@ -564,10 +564,10 @@ function Get-UpdatePolicies {
     $srcOther_MDM   = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
 
     # Resolve: GP wins, then MDM
-    $srcFeature = if ($null -ne $srcFeature_GP) { $srcFeature_GP } elseif ($null -ne $srcFeature_MDM) { $srcFeature_MDM } else { $null }
-    $srcQuality = if ($null -ne $srcQuality_GP) { $srcQuality_GP } elseif ($null -ne $srcQuality_MDM) { $srcQuality_MDM } else { $null }
-    $srcDriver  = if ($null -ne $srcDriver_GP)  { $srcDriver_GP }  elseif ($null -ne $srcDriver_MDM)  { $srcDriver_MDM }  else { $null }
-    $srcOther   = if ($null -ne $srcOther_GP)   { $srcOther_GP }   elseif ($null -ne $srcOther_MDM)   { $srcOther_MDM }   else { $null }
+    if ($null -ne $srcFeature_GP) { $srcFeature = $srcFeature_GP } elseif ($null -ne $srcFeature_MDM) { $srcFeature = $srcFeature_MDM } else { $srcFeature = $null }
+    if ($null -ne $srcQuality_GP) { $srcQuality = $srcQuality_GP } elseif ($null -ne $srcQuality_MDM) { $srcQuality = $srcQuality_MDM } else { $srcQuality = $null }
+    if ($null -ne $srcDriver_GP)  { $srcDriver  = $srcDriver_GP }  elseif ($null -ne $srcDriver_MDM)  { $srcDriver  = $srcDriver_MDM }  else { $srcDriver  = $null }
+    if ($null -ne $srcOther_GP)   { $srcOther   = $srcOther_GP }   elseif ($null -ne $srcOther_MDM)   { $srcOther   = $srcOther_MDM }   else { $srcOther   = $null }
 
     # --- Compliance Deadlines ---
     # GP writes native names (ComplianceDeadlineForFU, ComplianceDeadline); MDM/CSP uses Configure* names
@@ -593,24 +593,24 @@ function Get-UpdatePolicies {
     $deadlineGrace_MDM   = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineGracePeriod'
     $deadlineGraceFU_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates'
 
-    $deadlineFeature = if ($null -ne $deadlineFeature_GP) { $deadlineFeature_GP } else { $deadlineFeature_MDM }
-    $deadlineQuality = if ($null -ne $deadlineQuality_GP) { $deadlineQuality_GP } else { $deadlineQuality_MDM }
-    $deadlineGrace   = if ($null -ne $deadlineGrace_GP)   { $deadlineGrace_GP }   else { $deadlineGrace_MDM }
-    $deadlineGraceFU = if ($null -ne $deadlineGraceFU_GP) { $deadlineGraceFU_GP } else { $deadlineGraceFU_MDM }
+    if ($null -ne $deadlineFeature_GP) { $deadlineFeature = $deadlineFeature_GP } else { $deadlineFeature = $deadlineFeature_MDM }
+    if ($null -ne $deadlineQuality_GP) { $deadlineQuality = $deadlineQuality_GP } else { $deadlineQuality = $deadlineQuality_MDM }
+    if ($null -ne $deadlineGrace_GP)   { $deadlineGrace   = $deadlineGrace_GP }   else { $deadlineGrace   = $deadlineGrace_MDM }
+    if ($null -ne $deadlineGraceFU_GP) { $deadlineGraceFU = $deadlineGraceFU_GP } else { $deadlineGraceFU = $deadlineGraceFU_MDM }
 
     # --- Channel / Preview Builds ---
     $branchLevel_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'BranchReadinessLevel'
     $branchLevel_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'BranchReadinessLevel'
-    $branchLevel     = if ($null -ne $branchLevel_GP) { $branchLevel_GP } else { $branchLevel_MDM }
+    if ($null -ne $branchLevel_GP) { $branchLevel = $branchLevel_GP } else { $branchLevel = $branchLevel_MDM }
 
     $previewBuilds_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ManagePreviewBuilds'
     $previewBuilds_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ManagePreviewBuilds'
-    $previewBuilds     = if ($null -ne $previewBuilds_GP) { $previewBuilds_GP } else { $previewBuilds_MDM }
+    if ($null -ne $previewBuilds_GP) { $previewBuilds = $previewBuilds_GP } else { $previewBuilds = $previewBuilds_MDM }
 
     # --- Driver Exclusion ---
     $excludeDrivers_GP  = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'ExcludeWUDriversInQualityUpdate'
     $excludeDrivers_MDM = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'ExcludeWUDriversInQualityUpdate'
-    $excludeDrivers     = if ($null -ne $excludeDrivers_GP) { $excludeDrivers_GP } else { $excludeDrivers_MDM }
+    if ($null -ne $excludeDrivers_GP) { $excludeDrivers = $excludeDrivers_GP } else { $excludeDrivers = $excludeDrivers_MDM }
 
     # --- Deferrals (multi-source with priority) ---
     $gpFeatureDefer = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DeferFeatureUpdatesPeriodInDays'
@@ -873,7 +873,7 @@ function Show-UpdateReport {
     Write-ReportLine "Details" $Authority.Details 'DarkGray'
 
     if ($Authority.IsCoManaged) {
-        $coMgmtLabel = if ($Authority.Authority -like '*via Intune*') { 'WU workload shifted to Intune' } else { 'WU workload remains with SCCM' }
+        if ($Authority.Authority -like '*via Intune*') { $coMgmtLabel = 'WU workload shifted to Intune' } else { $coMgmtLabel = 'WU workload remains with SCCM' }
         Write-ReportLine "Co-Management" $coMgmtLabel 'Cyan'
     }
 
@@ -908,15 +908,15 @@ function Show-UpdateReport {
     # --- Update Status ---
     Write-Section "Update Status"
     if ($UpdateStatus.RebootRequired) {
-        # COM API says reboot needed — authoritative, matches Settings app
+        # COM API says reboot needed -- authoritative, matches Settings app
         $sources = @()
         if ($UpdateStatus.RebootRequiredWUReg) { $sources += 'WU registry' }
         if ($UpdateStatus.RebootRequiredCBS)   { $sources += 'CBS' }
-        $detail = if ($sources.Count -gt 0) { " (flags: $($sources -join ', '))" } else { '' }
+        if ($sources.Count -gt 0) { $detail = " (flags: $($sources -join ', '))" } else { $detail = '' }
         Write-ReportLine "Pending Reboot" "YES$detail" 'Red'
     }
     elseif ($UpdateStatus.RebootRequiredWUReg -or $UpdateStatus.RebootRequiredCBS) {
-        # Registry flags present but COM API says no reboot needed — stale flags
+        # Registry flags present but COM API says no reboot needed -- stale flags
         $sources = @()
         if ($UpdateStatus.RebootRequiredWUReg) { $sources += 'WU registry' }
         if ($UpdateStatus.RebootRequiredCBS)   { $sources += 'CBS' }
@@ -1006,8 +1006,8 @@ function Show-UpdateReport {
         Write-Section "Policy-Driven Update Source"
         foreach ($src in $srcNames) {
             if ($null -ne $src.Value) {
-                $srcLabel = if ($src.Value -eq 0) { 'Windows Update (WUfB)' } elseif ($src.Value -eq 1) { 'WSUS' } else { "Unknown ($($src.Value))" }
-                $srcColor = if ($src.Value -eq 0) { 'Green' } else { 'Yellow' }
+                if ($src.Value -eq 0) { $srcLabel = 'Windows Update (WUfB)' } elseif ($src.Value -eq 1) { $srcLabel = 'WSUS' } else { $srcLabel = "Unknown ($($src.Value))" }
+                if ($src.Value -eq 0) { $srcColor = 'Green' } else { $srcColor = 'Yellow' }
                 Write-ReportLine "  $($src.Label)" $srcLabel $srcColor
             }
             else {
@@ -1167,7 +1167,7 @@ function Show-UpdateReport {
             if ($endDt -gt (Get-Date)) { $featurePaused = $true }
         }
         catch {
-            # Could not parse date — do not assume paused
+            # Could not parse date -- do not assume paused
             $featureDateUnparseable = $true
         }
     }
@@ -1265,7 +1265,7 @@ function Show-UpdateReport {
     if ($UpdateHistory.Count -gt 0) {
         Write-Section "Recent Update History"
         foreach ($entry in $UpdateHistory) {
-            $dateStr = if ($entry.Date) { $entry.Date.ToString('yyyy-MM-dd HH:mm') } else { '(unknown)' }
+            if ($entry.Date) { $dateStr = $entry.Date.ToString('yyyy-MM-dd HH:mm') } else { $dateStr = '(unknown)' }
             $resultColor = switch ($entry.Result) {
                 'Succeeded' { 'Green' }
                 'Failed' { 'Red' }
@@ -1286,10 +1286,10 @@ function Show-UpdateReport {
     if ($UpdateServices.Count -gt 0) {
         Write-Section "Registered Update Services (Runtime)"
         foreach ($svc in $UpdateServices) {
-            $svcColor = if ($svc.IsDefaultAUService) { 'Green' } else { 'DarkGray' }
+            if ($svc.IsDefaultAUService) { $svcColor = 'Green' } else { $svcColor = 'DarkGray' }
             $label = $svc.Name
             if ($svc.IsDefaultAUService) { $label += ' [DEFAULT]' }
-            $detail = if ($svc.ServiceUrl) { $svc.ServiceUrl } else { '(no URL - built-in)' }
+            if ($svc.ServiceUrl) { $detail = $svc.ServiceUrl } else { $detail = '(no URL - built-in)' }
             Write-ReportLine "  $label" $detail $svcColor
         }
     }
@@ -1488,7 +1488,7 @@ function Set-AutoUpdateBehavior {
 
     try {
         Ensure-RegistryPath -Path $script:RegPath_AU
-        # Remove NoAutoUpdate rather than writing 0 — "not configured" requires the value to not exist
+        # Remove NoAutoUpdate rather than writing 0 -- "not configured" requires the value to not exist
         $noAutoUpdateCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
         if ($noAutoUpdateCurrent -eq 1) {
             Remove-ItemProperty -Path $script:RegPath_AU -Name 'NoAutoUpdate' -ErrorAction SilentlyContinue
@@ -1609,7 +1609,7 @@ function Set-PauseUpdates {
                 Write-Host "  Quality updates unpaused." -ForegroundColor Green
             }
             # PauseUpdatesExpiryTime in UX Settings is a consolidated expiry covering all update
-            # types — only safe to remove when unpausing both
+            # types -- only safe to remove when unpausing both
             if ($typeInput -eq '3' -and (Test-Path $script:RegPath_UX)) {
                 Remove-ItemProperty -Path $script:RegPath_UX -Name 'PauseUpdatesExpiryTime' -ErrorAction SilentlyContinue
             }
@@ -1826,7 +1826,7 @@ function Restore-WUSettings {
 
                     $validKinds = @('String','ExpandString','Binary','DWord','MultiString','QWord')
                     if ($typeName -notin $validKinds) {
-                        Write-Host "  WARNING: Unrecognized registry type '$typeName' for value '$valName' — restoring as String." -ForegroundColor Yellow
+                        Write-Host "  WARNING: Unrecognized registry type '$typeName' for value '$valName' -- restoring as String." -ForegroundColor Yellow
                         $typeName = 'String'
                     }
 
@@ -1945,7 +1945,7 @@ function Get-WUfBCleanupItems {
         }
     }
 
-    # MDM PolicyManager path — same WUfB indicator values delivered via CSP.
+    # MDM PolicyManager path -- same WUfB indicator values delivered via CSP.
     # Note: if the device still has an active Intune enrollment these values will be
     # re-delivered on next MDM sync. Cleanup here prevents dual-scan immediately after
     # the switch but Intune policy must also be updated for a permanent change.
@@ -2107,7 +2107,7 @@ function Switch-ToWUfB {
     # Build the set list
     $toSet = @()
 
-    # PolicyDrivenSource keys — explicitly direct updates to Windows Update (value 0)
+    # PolicyDrivenSource keys -- explicitly direct updates to Windows Update (value 0)
     # These are the most definitive WUfB signal on Windows 10 2004+ / Windows 11
     $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForFeatureUpdates'; Value = 0; Type = 'DWord' }
     $toSet += @{ Path = $script:RegPath_WU; Name = 'SetPolicyDrivenUpdateSourceForQualityUpdates'; Value = 0; Type = 'DWord' }
@@ -2241,7 +2241,7 @@ function Switch-ToWSUS {
         return
     }
 
-    # Remove NoAutoUpdate rather than writing 0 — "not configured" requires the value to not exist
+    # Remove NoAutoUpdate rather than writing 0 -- "not configured" requires the value to not exist
     $noAutoUpdateCurrent = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
     if ($noAutoUpdateCurrent -eq 1) {
         $toRemove += @{ Path = $script:RegPath_AU; Name = 'NoAutoUpdate' }
