@@ -5,37 +5,35 @@
 
 .DESCRIPTION
     Intune Proactive Remediation detection script.
-    Determines whether the device is receiving updates via WUfB (compliant)
-    or another source such as WSUS, SCCM, or no policy at all (non-compliant).
+    Determines whether the device's update infrastructure is correctly
+    configured for WUfB to manage updates (compliant) or whether something
+    is blocking or overriding WUfB (non-compliant, triggers remediation).
 
-    Checks for blockers that prevent WUfB from functioning:
-    - NoAutoUpdate=1 or AUOptions=1 (automatic updates disabled)
-    - DoNotConnectToWindowsUpdateInternetLocations=1 (WU connectivity blocked)
-    - SetDisableUXWUAccess=1 (WU UI/access disabled)
-    - Windows Update (wuauserv) or Update Orchestrator (UsoSvc) services disabled
+    Core question: "Does this device have all the necessary settings so
+    that Intune WUfB can manage ALL updates?"
 
-    Checks all WUfB indicator registry locations:
-    - SetPolicyDrivenUpdateSourceFor* keys (Feature/Quality/Driver/Other)
-    - Deferral policies (GP and MDM paths)
-    - Version targeting (TargetReleaseVersion / ProductVersion)
-    - Compliance deadlines and grace periods
-    - Channel targeting (BranchReadinessLevel)
-    - Preview build management (ManagePreviewBuilds)
-    - Driver exclusion (ExcludeWUDriversInQualityUpdate)
+    Primary compliance gates (evaluated in order):
+    1. No update blockers:
+       - NoAutoUpdate=1 or AUOptions=1 (automatic updates disabled)
+       - DoNotConnectToWindowsUpdateInternetLocations=1 (WU connectivity blocked)
+       - SetDisableUXWUAccess=1 (WU UI/access disabled)
+       - Windows Update (wuauserv) or Update Orchestrator (UsoSvc) services disabled
+    2. No SCCM controlling updates (unless co-mgmt WU workload shifted to Intune)
+    3. All four PolicyDrivenSource keys set to 0 (WU) — Feature, Quality,
+       Driver, Other. These are required regardless of WSUS presence. Missing
+       or wrong-valued keys are non-compliant.
 
-    Handles split-source scenarios where WSUS is configured but WUfB
-    controls feature/quality updates via SetPolicyDrivenUpdateSource keys.
+    Secondary gates — is the device actually receiving WUfB policy?
+    - Intune WUfB Update Ring actively delivering policy ($Config_RequireUpdateRing)
+    - Active MDM enrollment ($Config_RequireMDMEnrollment)
+    - Recent Windows Update scan activity ($Config_MaxScanAgeDays)
 
-    Optionally verifies that an Intune WUfB Update Ring is actively delivering
-    policy (not just that PolicyDrivenSource keys exist from remediation).
-    Controlled by $Config_RequireUpdateRing.
+    WUfB policy indicators (deferrals, deadlines, version targeting, etc.)
+    are collected for informational output but are NOT compliance gates —
+    those settings come from the Intune Update Ring.
 
-    Validates management channel health:
-    - Active MDM enrollment (Intune enrolled with valid state)
-    - Recent Windows Update scan activity (configurable staleness threshold)
-
-    Exit 0 = WUfB detected (compliant, no remediation needed)
-    Exit 1 = WUfB not detected (non-compliant, triggers remediation)
+    Exit 0 = Infrastructure correct and device receiving policy (compliant)
+    Exit 1 = Infrastructure wrong or device not receiving policy (non-compliant)
 
 .NOTES
     Author:  Joshua Walderbach
@@ -348,15 +346,26 @@ try {
     # ========================================================================
     #  EVALUATE COMPLIANCE
     # ========================================================================
+    #  Core question: "Does this device have all the necessary settings so
+    #  that Intune WUfB can manage ALL updates?"
+    #
+    #  Primary compliance: the 4 PolicyDrivenSource keys must ALL be set to 0,
+    #  no blockers, no SCCM/WSUS overriding. These are the infrastructure
+    #  settings that make WUfB win.
+    #
+    #  Secondary: is the device actually receiving WUfB policy from Intune?
+    #  (Update Ring delivery, MDM enrollment, scan freshness)
+    #
+    #  WUfB policy indicators (deferrals, deadlines, etc.) are informational
+    #  output only — they come from the Update Ring, not from this script.
+    # ========================================================================
 
     $hasWUfBIndicators = ($indicators.Count -gt 0)
+    $detail = if ($hasWUfBIndicators) { $indicators -join '; ' } else { 'No WUfB policy indicators present' }
 
-    # Split-source: WSUS is configured but PolicyDrivenSource directs some update types to WU
-    $anyPolicyDrivenToWU = ($featureFromWU -or $qualityFromWU -or $driverFromWU -or $otherFromWU)
     $allPolicyDrivenToWU = ($featureFromWU -and $qualityFromWU -and $driverFromWU -and $otherFromWU)
-    $isSplitSource = ($hasWSUS -and $anyPolicyDrivenToWU)
 
-    # Blockers prevent WUfB from functioning — non-compliant regardless of other indicators
+    # --- Gate 1: Blockers prevent WUfB from functioning ---
     if ($hasBlockers) {
         $blockerDetail = $blockers -join '; '
         $msg = "NON-COMPLIANT: Update blockers detected ($blockerDetail). WUfB policies cannot take effect."
@@ -365,107 +374,94 @@ try {
         exit 1
     }
 
-    # Any PolicyDrivenSource key pointing to WSUS (value 1) is non-compliant
-    if ($anyPolicyDrivenToWU -and -not $allPolicyDrivenToWU) {
-        $wsusTypes = @()
-        if (-not $featureFromWU -and $null -ne $srcFeature) { $wsusTypes += 'Feature' }
-        if (-not $qualityFromWU -and $null -ne $srcQuality) { $wsusTypes += 'Quality' }
-        if (-not $driverFromWU  -and $null -ne $srcDriver)  { $wsusTypes += 'Driver' }
-        if (-not $otherFromWU   -and $null -ne $srcOther)   { $wsusTypes += 'Other' }
-        $msg = "NON-COMPLIANT: PolicyDrivenSource directs $($wsusTypes -join ', ') updates to WSUS (value 1). All update types must use WUfB (value 0)."
+    # --- Gate 2: SCCM controlling updates (without co-mgmt WU shift) ---
+    if ($hasSCCM) {
+        $msg = "NON-COMPLIANT: Device is managed by SCCM/ConfigMgr (WU workload not shifted to Intune). $detail"
         Write-Log $msg
         Write-Output $msg
         exit 1
     }
 
-    if ($hasWUfBIndicators -and (-not $hasWSUS -or $isSplitSource)) {
-        # WUfB is managing updates (either exclusively or via split-source)
-        $detail = $indicators -join '; '
-
-        # Check if an Intune Update Ring is actively delivering WUfB policy
-        $hasUpdateRing = Test-IntuneUpdateRingDelivered
-
-        if (-not $hasUpdateRing -and $Config_RequireUpdateRing) {
-            $msg = "NON-COMPLIANT: Device is pointed at Windows Update but no Intune WUfB Update Ring policy detected. Assign an Update Ring to manage this device. $detail"
-            Write-Log $msg
-            Write-Output $msg
-            exit 1
+    # --- Gate 3: All four PolicyDrivenSource keys must be set to 0 (WU) ---
+    # These are THE definitive settings that tell the device WUfB manages all
+    # update types. Required regardless of whether WSUS is present.
+    if (-not $allPolicyDrivenToWU) {
+        $missing = @()
+        $wrongValue = @()
+        foreach ($type in @('Feature','Quality','Driver','Other')) {
+            $val = Get-Variable -Name "src$type" -ValueOnly
+            if ($null -eq $val) {
+                $missing += $type
+            }
+            elseif ($val -ne 0) {
+                $wrongValue += "$type=$val"
+            }
         }
-
-        # --- Management channel health checks ---
-        $healthWarnings = @()
-
-        # MDM enrollment health
-        $mdmHealth = Test-MDMEnrollmentHealth
-        if ($Config_RequireMDMEnrollment -and -not $mdmHealth.Enrolled) {
-            $msg = "NON-COMPLIANT: No active Intune MDM enrollment found. Device cannot receive WUfB policy from Intune. Manual re-enrollment required. $detail"
-            Write-Log $msg
-            Write-Output $msg
-            exit 1
-        }
-        if ($mdmHealth.Enrolled) {
-            $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-mgmt bridge' } else { 'Intune' }
-            $healthWarnings += "MDM: Enrolled via $providerLabel ($($mdmHealth.UPN))"
-        }
-        else {
-            $healthWarnings += 'MDM: Not enrolled'
-        }
-
-        # Last WU scan freshness
-        $scanStatus = Get-LastWUScanStatus
-        if ($Config_MaxScanAgeDays -gt 0 -and $null -ne $scanStatus.AgeDays -and $scanStatus.AgeDays -gt $Config_MaxScanAgeDays) {
-            $msg = "NON-COMPLIANT: Windows Update has not scanned in $($scanStatus.AgeDays) days (threshold: ${Config_MaxScanAgeDays}d). Last scan: $($scanStatus.LastScan). Manual investigation required. $detail"
-            Write-Log $msg
-            Write-Output $msg
-            exit 1
-        }
-        if ($null -ne $scanStatus.AgeDays) {
-            $healthWarnings += "LastScan: $($scanStatus.AgeDays)d ago"
-        }
-        else {
-            $healthWarnings += 'LastScan: Unknown'
-        }
-
-        $ringStatus = if ($hasUpdateRing) { ' [Update Ring: Active]' } else { ' [Update Ring: Not detected]' }
-        $healthDetail = ' [' + ($healthWarnings -join ', ') + ']'
-
-        if ($isSplitSource) {
-            $msg = "COMPLIANT: WUfB detected (split-source with WSUS at $wuServer).$ringStatus$healthDetail $detail"
-        }
-        else {
-            $msg = "COMPLIANT: WUfB detected.$ringStatus$healthDetail $detail"
-        }
+        $problems = @()
+        if ($missing.Count -gt 0)    { $problems += "missing: $($missing -join ', ')" }
+        if ($wrongValue.Count -gt 0) { $problems += "not WU: $($wrongValue -join ', ')" }
+        $wsusNote = if ($hasWSUS) { " WSUS is configured ($wuServer) and will control these update types." } else { '' }
+        $msg = "NON-COMPLIANT: PolicyDrivenSource not set to WU (0) for all update types ($($problems -join '; ')).${wsusNote} $detail"
         Write-Log $msg
         Write-Output $msg
-        exit 0
+        exit 1
     }
 
-    # Not WUfB — report why
-    if ($hasWSUS -and $hasWUfBIndicators -and $disableDualScan -ne 1) {
-        # WSUS active with WUfB indicators but no PolicyDrivenSource override and dual-scan not suppressed
-        $msg = "NON-COMPLIANT: Dual-scan state (WSUS at $wuServer + WUfB policies). No PolicyDrivenSource override."
+    # --- Primary compliance passed: all infrastructure settings are correct ---
+    # WUfB will manage all update types on this device.
+    # Now check secondary gates: is the device actually receiving WUfB policy?
+
+    $hasUpdateRing = Test-IntuneUpdateRingDelivered
+
+    if (-not $hasUpdateRing -and $Config_RequireUpdateRing) {
+        $msg = "NON-COMPLIANT: Infrastructure is correct for WUfB but no Intune Update Ring policy detected. Assign an Update Ring to manage this device. $detail"
+        Write-Log $msg
+        Write-Output $msg
+        exit 1
     }
-    elseif ($hasWSUS -and $hasWUfBIndicators -and $disableDualScan -eq 1) {
-        # WSUS active with WUfB indicators, but dual-scan is suppressed — still non-compliant but not dual-scan
-        $msg = "NON-COMPLIANT: WSUS at $wuServer with WUfB policies present. DisableDualScan=1 suppresses dual-scan but no PolicyDrivenSource override."
+
+    # --- Management channel health checks ---
+    $healthWarnings = @()
+
+    # MDM enrollment health
+    $mdmHealth = Test-MDMEnrollmentHealth
+    if ($Config_RequireMDMEnrollment -and -not $mdmHealth.Enrolled) {
+        $msg = "NON-COMPLIANT: Infrastructure is correct for WUfB but no active Intune MDM enrollment found. Device cannot receive WUfB policy from Intune. Manual re-enrollment required. $detail"
+        Write-Log $msg
+        Write-Output $msg
+        exit 1
     }
-    elseif ($hasWSUS) {
-        $wsusDetail = $wuServer
-        if ($null -ne $wuStatusServer) { $wsusDetail += ", Status: $wuStatusServer" }
-        $msg = "NON-COMPLIANT: Device is using WSUS ($wsusDetail), no WUfB policies detected."
-    }
-    elseif ($wuShiftedToIntune) {
-        $msg = "NON-COMPLIANT: Co-managed device (WU workload assigned to Intune), no WUfB policies detected."
-    }
-    elseif ($hasSCCM) {
-        $msg = "NON-COMPLIANT: Device is managed by SCCM/ConfigMgr. No WUfB policies detected."
+    if ($mdmHealth.Enrolled) {
+        $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-mgmt bridge' } else { 'Intune' }
+        $healthWarnings += "MDM: Enrolled via $providerLabel ($($mdmHealth.UPN))"
     }
     else {
-        $msg = "NON-COMPLIANT: No WUfB policies detected. Device using default Windows Update."
+        $healthWarnings += 'MDM: Not enrolled'
     }
+
+    # Last WU scan freshness
+    $scanStatus = Get-LastWUScanStatus
+    if ($Config_MaxScanAgeDays -gt 0 -and $null -ne $scanStatus.AgeDays -and $scanStatus.AgeDays -gt $Config_MaxScanAgeDays) {
+        $msg = "NON-COMPLIANT: Windows Update has not scanned in $($scanStatus.AgeDays) days (threshold: ${Config_MaxScanAgeDays}d). Last scan: $($scanStatus.LastScan). Manual investigation required. $detail"
+        Write-Log $msg
+        Write-Output $msg
+        exit 1
+    }
+    if ($null -ne $scanStatus.AgeDays) {
+        $healthWarnings += "LastScan: $($scanStatus.AgeDays)d ago"
+    }
+    else {
+        $healthWarnings += 'LastScan: Unknown'
+    }
+
+    $ringStatus = if ($hasUpdateRing) { ' [Update Ring: Active]' } else { ' [Update Ring: Not detected]' }
+    $healthDetail = ' [' + ($healthWarnings -join ', ') + ']'
+    $wsusNote = if ($hasWSUS) { " (WSUS at $wuServer overridden)" } else { '' }
+
+    $msg = "COMPLIANT: All PolicyDrivenSource keys set to WU${wsusNote}.$ringStatus$healthDetail $detail"
     Write-Log $msg
     Write-Output $msg
-    exit 1
+    exit 0
 }
 catch {
     $msg = "ERROR: Detection failed - $($_.Exception.Message)"
