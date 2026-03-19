@@ -106,7 +106,9 @@ WUDUP reads from 12 registry base paths, 3 Windows services, 3 COM objects, and 
 
 ## Key Concepts
 
-**Split-source** — WSUS configured but `SetPolicyDrivenUpdateSourceFor*=0` directs some update types to Windows Update. This is a valid WUfB configuration.
+**Split-source (full)** — WSUS configured but `SetPolicyDrivenUpdateSourceFor*=0` for all four update types (Feature, Quality, Driver, Other). This is a valid WUfB configuration — WSUS is effectively overridden.
+
+**Split-source (partial)** — WSUS configured with some `SetPolicyDrivenUpdateSourceFor*` keys set to `0` (WU) and others set to `1` (WSUS). This is a misconfiguration — all update types must use WUfB. Flagged as non-compliant.
 
 **Dual-scan** — WSUS active with WUfB deferral policies but no PolicyDrivenSource override. This is a misconfiguration where the WU client may scan both WSUS and Microsoft Update unpredictably.
 

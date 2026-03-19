@@ -540,10 +540,14 @@ function Get-ManagementAuthority {
     if ($srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0) { $wufbIndicators += 'PolicyDrivenSource(Driver)' }
     if ($srcOther_GP -eq 0 -or $srcOther_MDM -eq 0)   { $wufbIndicators += 'PolicyDrivenSource(Other)' }
 
-    $isSplitSource = ($hasWSUS -and ($srcFeature_GP -eq 0 -or $srcFeature_MDM -eq 0 -or
-                                      $srcQuality_GP -eq 0 -or $srcQuality_MDM -eq 0 -or
-                                      $srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0 -or
-                                      $srcOther_GP -eq 0 -or $srcOther_MDM -eq 0))
+    $featureFromWU = ($srcFeature_GP -eq 0 -or $srcFeature_MDM -eq 0)
+    $qualityFromWU = ($srcQuality_GP -eq 0 -or $srcQuality_MDM -eq 0)
+    $driverFromWU  = ($srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0)
+    $otherFromWU   = ($srcOther_GP -eq 0 -or $srcOther_MDM -eq 0)
+    $anyPolicyDrivenToWU = ($featureFromWU -or $qualityFromWU -or $driverFromWU -or $otherFromWU)
+    $allPolicyDrivenToWU = ($featureFromWU -and $qualityFromWU -and $driverFromWU -and $otherFromWU)
+
+    $isSplitSource = ($hasWSUS -and $anyPolicyDrivenToWU)
     $result.IsSplitSource = $isSplitSource
 
     # Update blocker checks -- matches PR detect logic
@@ -582,6 +586,19 @@ function Get-ManagementAuthority {
                 $result.IsWUfB = $false
             }
         }
+        elseif ($anyPolicyDrivenToWU -and -not $allPolicyDrivenToWU) {
+            # Some PolicyDrivenSource keys point to WU but others point to WSUS
+            $wsusTypes = @()
+            if (-not $featureFromWU -and ($null -ne $srcFeature_GP -or $null -ne $srcFeature_MDM)) { $wsusTypes += 'Feature' }
+            if (-not $qualityFromWU -and ($null -ne $srcQuality_GP -or $null -ne $srcQuality_MDM)) { $wsusTypes += 'Quality' }
+            if (-not $driverFromWU  -and ($null -ne $srcDriver_GP  -or $null -ne $srcDriver_MDM))  { $wsusTypes += 'Driver' }
+            if (-not $otherFromWU   -and ($null -ne $srcOther_GP   -or $null -ne $srcOther_MDM))   { $wsusTypes += 'Other' }
+            $result.Authority = 'WUfB (partial - some types via WSUS)'
+            $result.Details = "PolicyDrivenSource directs $($wsusTypes -join ', ') updates to WSUS. All update types must use WUfB."
+            $result.IsWUfB = $false
+            $result.IsGPOManaged = $true
+            $result.CanModify = $true
+        }
         elseif ($wufbIndicators.Count -gt 0 -and (-not $hasWSUS -or $isSplitSource)) {
             if ($isSplitSource) {
                 $result.Authority = 'WUfB (split-source with WSUS)'
@@ -603,11 +620,25 @@ function Get-ManagementAuthority {
         }
     }
     elseif ($hasWSUS -and $isSplitSource -and -not $result.IsSCCMManaged) {
-        # WSUS was set as authority above, but PolicyDrivenSource overrides for some update types
-        $result.Authority = 'WUfB (split-source with WSUS)'
-        $result.Details = "WUfB controls updates via PolicyDrivenSource; WSUS also configured at $wuServer"
-        $result.IsWUfB = $true
-        $result.IsWSUS = $true
+        if (-not $allPolicyDrivenToWU) {
+            # Some PolicyDrivenSource keys still point to WSUS
+            $wsusTypes = @()
+            if (-not $featureFromWU -and ($null -ne $srcFeature_GP -or $null -ne $srcFeature_MDM)) { $wsusTypes += 'Feature' }
+            if (-not $qualityFromWU -and ($null -ne $srcQuality_GP -or $null -ne $srcQuality_MDM)) { $wsusTypes += 'Quality' }
+            if (-not $driverFromWU  -and ($null -ne $srcDriver_GP  -or $null -ne $srcDriver_MDM))  { $wsusTypes += 'Driver' }
+            if (-not $otherFromWU   -and ($null -ne $srcOther_GP   -or $null -ne $srcOther_MDM))   { $wsusTypes += 'Other' }
+            $result.Authority = 'WUfB (partial - some types via WSUS)'
+            $result.Details = "PolicyDrivenSource directs $($wsusTypes -join ', ') updates to WSUS. WSUS at $wuServer. All update types must use WUfB."
+            $result.IsWUfB = $false
+            $result.IsWSUS = $true
+        }
+        else {
+            # All PolicyDrivenSource keys point to WU — WSUS is overridden
+            $result.Authority = 'WUfB (split-source with WSUS)'
+            $result.Details = "WUfB controls updates via PolicyDrivenSource; WSUS also configured at $wuServer"
+            $result.IsWUfB = $true
+            $result.IsWSUS = $true
+        }
     }
 
     return $result
@@ -1117,7 +1148,7 @@ function Show-UpdateReport {
         foreach ($src in $srcNames) {
             if ($null -ne $src.Value) {
                 if ($src.Value -eq 0) { $srcLabel = 'Windows Update (WUfB)' } elseif ($src.Value -eq 1) { $srcLabel = 'WSUS' } else { $srcLabel = "Unknown ($($src.Value))" }
-                if ($src.Value -eq 0) { $srcColor = 'Green' } else { $srcColor = 'Yellow' }
+                if ($src.Value -eq 0) { $srcColor = 'Green' } else { $srcColor = 'Red' }
                 Write-ReportLine "  $($src.Label)" $srcLabel $srcColor
             }
             else {

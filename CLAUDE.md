@@ -69,7 +69,8 @@ All scripts use `Get-SafeRegistryValue` with identical logic:
 SCCM (with co-management check) → MDM/Intune (with enrollment verification) → WSUS (with split-source check) → WUfB/GPO → Local
 
 ### Key Concepts
-- **Split-source**: WSUS configured + PolicyDrivenSource=0 for some update types. This IS valid WUfB, not a misconfiguration.
+- **Split-source (full)**: WSUS configured + PolicyDrivenSource=0 for ALL four update types. This IS valid WUfB — WSUS is effectively overridden.
+- **Split-source (partial)**: WSUS configured + PolicyDrivenSource=0 for some types but =1 for others. This IS a misconfiguration — all update types must use WUfB. Flagged as non-compliant.
 - **Dual-scan**: WSUS + WUfB deferrals WITHOUT PolicyDrivenSource override AND `DisableDualScan` not set. This IS a misconfiguration to flag.
 - **Stale MDM**: PolicyManager keys exist but no active enrollment in `HKLM:\SOFTWARE\Microsoft\Enrollments`.
 - **UseUpdateClassPolicySource**: Must be set to 1 in AU subkey when writing PolicyDrivenSource keys via direct registry write (not GPO/CSP). GPO and CSP set this automatically.

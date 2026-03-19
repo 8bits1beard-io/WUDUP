@@ -273,7 +273,9 @@ WUDUP determines the device's management authority in this order:
 
 ## Key Detection Concepts
 
-**Split-source**: WSUS configured (`UseWUServer=1`) but `SetPolicyDrivenUpdateSourceFor*=0` directs some update types to Windows Update. This is a valid WUfB configuration, not a misconfiguration.
+**Split-source (full)**: WSUS configured (`UseWUServer=1`) but `SetPolicyDrivenUpdateSourceFor*=0` for all four update types. This is a valid WUfB configuration — WSUS is effectively overridden.
+
+**Split-source (partial)**: WSUS configured with some `SetPolicyDrivenUpdateSourceFor*` keys set to `0` (WU) and others set to `1` (WSUS). This is a misconfiguration — all update types must use WUfB. Flagged as non-compliant.
 
 **Dual-scan**: WSUS active + WUfB deferral policies present, but NO PolicyDrivenSource override and `DisableDualScan` is not set. This is a misconfiguration where the WU client may scan both WSUS and Microsoft Update unpredictably.
 

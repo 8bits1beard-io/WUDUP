@@ -353,12 +353,26 @@ try {
 
     # Split-source: WSUS is configured but PolicyDrivenSource directs some update types to WU
     $anyPolicyDrivenToWU = ($featureFromWU -or $qualityFromWU -or $driverFromWU -or $otherFromWU)
+    $allPolicyDrivenToWU = ($featureFromWU -and $qualityFromWU -and $driverFromWU -and $otherFromWU)
     $isSplitSource = ($hasWSUS -and $anyPolicyDrivenToWU)
 
     # Blockers prevent WUfB from functioning — non-compliant regardless of other indicators
     if ($hasBlockers) {
         $blockerDetail = $blockers -join '; '
         $msg = "NON-COMPLIANT: Update blockers detected ($blockerDetail). WUfB policies cannot take effect."
+        Write-Log $msg
+        Write-Output $msg
+        exit 1
+    }
+
+    # Any PolicyDrivenSource key pointing to WSUS (value 1) is non-compliant
+    if ($anyPolicyDrivenToWU -and -not $allPolicyDrivenToWU) {
+        $wsusTypes = @()
+        if (-not $featureFromWU -and $null -ne $srcFeature) { $wsusTypes += 'Feature' }
+        if (-not $qualityFromWU -and $null -ne $srcQuality) { $wsusTypes += 'Quality' }
+        if (-not $driverFromWU  -and $null -ne $srcDriver)  { $wsusTypes += 'Driver' }
+        if (-not $otherFromWU   -and $null -ne $srcOther)   { $wsusTypes += 'Other' }
+        $msg = "NON-COMPLIANT: PolicyDrivenSource directs $($wsusTypes -join ', ') updates to WSUS (value 1). All update types must use WUfB (value 0)."
         Write-Log $msg
         Write-Output $msg
         exit 1
