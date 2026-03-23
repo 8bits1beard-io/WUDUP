@@ -132,7 +132,7 @@ function Format-Output {
     if ($UpdateSource -and $UpdateSource.Count -gt 0) {
         $lines += ""
         if ($HasBlockers) {
-            $lines += "Update Source (configured but NOT functional — blockers prevent WUfB from working):"
+            $lines += "Update Source (NOT functional — blockers must be removed first):"
         }
         else {
             $lines += "Update Source:"
@@ -148,7 +148,12 @@ function Format-Output {
 
     if ($Policy -and $Policy.Count -gt 0) {
         $lines += ""
-        $lines += "Applied WUfB Policy:"
+        if ($Issues -and $Issues.Count -gt 0 -and $Result -eq 'NON-COMPLIANT') {
+            $lines += "WUfB Policy (delivered but not effective — issues must be resolved first):"
+        }
+        else {
+            $lines += "WUfB Policy (active):"
+        }
         foreach ($p in $Policy) { $lines += "  $p" }
     }
 
@@ -307,10 +312,10 @@ try {
 
     # Build update source status lines for output
     $pdsStatus = @(
-        "  Feature updates sourced from:  $(if ($featureFromWU) { 'WUfB' } elseif ($null -eq $srcFeature_GP -and $null -eq $srcFeature_MDM) { 'NOT CONFIGURED' } else { 'WSUS' })"
-        "  Quality updates sourced from:  $(if ($qualityFromWU) { 'WUfB' } elseif ($null -eq $srcQuality_GP -and $null -eq $srcQuality_MDM) { 'NOT CONFIGURED' } else { 'WSUS' })"
-        "  Driver updates sourced from:   $(if ($driverFromWU)  { 'WUfB' } elseif ($null -eq $srcDriver_GP -and $null -eq $srcDriver_MDM)  { 'NOT CONFIGURED' } else { 'WSUS' })"
-        "  Other updates sourced from:    $(if ($otherFromWU)   { 'WUfB' } elseif ($null -eq $srcOther_GP -and $null -eq $srcOther_MDM)   { 'NOT CONFIGURED' } else { 'WSUS' })"
+        "  Feature updates configured for:  $(if ($featureFromWU) { 'WUfB' } elseif ($null -eq $srcFeature_GP -and $null -eq $srcFeature_MDM) { 'NOT SET' } else { 'WSUS' })"
+        "  Quality updates configured for:  $(if ($qualityFromWU) { 'WUfB' } elseif ($null -eq $srcQuality_GP -and $null -eq $srcQuality_MDM) { 'NOT SET' } else { 'WSUS' })"
+        "  Driver updates configured for:   $(if ($driverFromWU)  { 'WUfB' } elseif ($null -eq $srcDriver_GP -and $null -eq $srcDriver_MDM)  { 'NOT SET' } else { 'WSUS' })"
+        "  Other updates configured for:    $(if ($otherFromWU)   { 'WUfB' } elseif ($null -eq $srcOther_GP -and $null -eq $srcOther_MDM)   { 'NOT SET' } else { 'WSUS' })"
     )
 
     # PolicyDrivenSource status is shown in its own section — not duplicated in indicators
