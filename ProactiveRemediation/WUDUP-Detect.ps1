@@ -433,6 +433,31 @@ try {
     }
 
     # ========================================================================
+    #  COLLECT HEALTH DATA (before compliance gates, so all exits have context)
+    # ========================================================================
+
+    $hasUpdateRing = Test-IntuneUpdateRingDelivered
+    $mdmHealth     = Test-MDMEnrollmentHealth
+    $scanStatus    = Get-LastWUScanStatus
+
+    $healthLines = @()
+    $healthLines += "Update Ring:    $(if ($hasUpdateRing) { 'Active' } else { 'Not detected' })"
+    if ($mdmHealth.Enrolled) {
+        $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-management bridge' } else { 'Intune direct' }
+        $upnDisplay = if ($mdmHealth.UPN) { " ($($mdmHealth.UPN))" } else { '' }
+        $healthLines += "MDM:            Enrolled via $providerLabel$upnDisplay"
+    }
+    else {
+        $healthLines += "MDM:            Not enrolled"
+    }
+    if ($null -ne $scanStatus.AgeDays) {
+        $healthLines += "Last WU scan:   $($scanStatus.AgeDays) days ago"
+    }
+    else {
+        $healthLines += "Last WU scan:   Unknown"
+    }
+
+    # ========================================================================
     #  EVALUATE COMPLIANCE
     # ========================================================================
     #  Core question: "Does this device have all the necessary settings so
@@ -458,6 +483,7 @@ try {
             -Reason "Update blockers detected — WUfB cannot function on this device" `
             -Details ($blockers | ForEach-Object { "  - $_" }) `
             -UpdateSource $pdsStatus `
+            -Health $healthLines `
             -Policy $indicators
         Write-Log ($blockers -join '; ')
         Write-Output $msg
@@ -469,6 +495,7 @@ try {
         $msg = Format-Output -Result 'NON-COMPLIANT' `
             -Reason "SCCM/ConfigMgr is managing updates (WU workload not shifted to Intune)" `
             -UpdateSource $pdsStatus `
+            -Health $healthLines `
             -Policy $indicators
         Write-Log "SCCM controls WU workload"
         Write-Output $msg
@@ -494,6 +521,7 @@ try {
             -Reason $reason `
             -Details $problemLines `
             -UpdateSource $pdsStatus `
+            -Health $healthLines `
             -Policy $indicators
         Write-Log "Update source incomplete: $($problemLines -join '; ')"
         Write-Output $msg
@@ -503,44 +531,30 @@ try {
     # --- Primary compliance passed: all infrastructure settings are correct ---
     # Now check secondary gates: is the device actually receiving WUfB policy?
 
-    $hasUpdateRing = Test-IntuneUpdateRingDelivered
-    $healthLines = @()
-
     if (-not $hasUpdateRing -and $Config_RequireUpdateRing) {
         $msg = Format-Output -Result 'NON-COMPLIANT' `
             -Reason "Device is configured for WUfB but no Intune Update Ring is delivering policy" `
             -Details @("  Action: Assign a WUfB Update Ring to this device in Intune") `
             -UpdateSource $pdsStatus `
+            -Health $healthLines `
             -Policy $indicators
         Write-Log "No Update Ring policy detected"
         Write-Output $msg
         exit 1
     }
-    $healthLines += "Update Ring:    $(if ($hasUpdateRing) { 'Active' } else { 'Not detected' })"
 
-    # MDM enrollment health
-    $mdmHealth = Test-MDMEnrollmentHealth
     if ($Config_RequireMDMEnrollment -and -not $mdmHealth.Enrolled) {
         $msg = Format-Output -Result 'NON-COMPLIANT' `
             -Reason "Device has no active Intune MDM enrollment — cannot receive WUfB policy" `
             -Details @("  Action: Re-enroll this device in Intune") `
             -UpdateSource $pdsStatus `
+            -Health $healthLines `
             -Policy $indicators
         Write-Log "No active MDM enrollment"
         Write-Output $msg
         exit 1
     }
-    if ($mdmHealth.Enrolled) {
-        $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-management bridge' } else { 'Intune direct' }
-        $upnDisplay = if ($mdmHealth.UPN) { " ($($mdmHealth.UPN))" } else { '' }
-        $healthLines += "MDM:            Enrolled via $providerLabel$upnDisplay"
-    }
-    else {
-        $healthLines += "MDM:            Not enrolled"
-    }
 
-    # Last WU scan freshness
-    $scanStatus = Get-LastWUScanStatus
     if ($Config_MaxScanAgeDays -gt 0 -and $null -ne $scanStatus.AgeDays -and $scanStatus.AgeDays -gt $Config_MaxScanAgeDays) {
         $msg = Format-Output -Result 'NON-COMPLIANT' `
             -Reason "Windows Update has not scanned in $($scanStatus.AgeDays) days (threshold: $Config_MaxScanAgeDays days)" `
@@ -551,12 +565,6 @@ try {
         Write-Log "Stale WU scan: $($scanStatus.AgeDays) days"
         Write-Output $msg
         exit 1
-    }
-    if ($null -ne $scanStatus.AgeDays) {
-        $healthLines += "Last WU scan:   $($scanStatus.AgeDays) days ago"
-    }
-    else {
-        $healthLines += "Last WU scan:   Unknown"
     }
 
     # --- Compliant ---
