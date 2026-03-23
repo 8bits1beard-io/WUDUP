@@ -275,24 +275,28 @@ try {
     $indicators = @()
 
     # --- 1. Policy-Driven Update Source (most definitive, Windows 10 2004+) ---
-    # Check all 4 types: Feature, Quality, Driver, Other
-    $srcFeature = Get-PolicyValue -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
-    $srcQuality = Get-PolicyValue -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
-    $srcDriver  = Get-PolicyValue -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
-    $srcOther   = Get-PolicyValue -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
+    # Read GP and MDM separately — MDM-delivered PolicyDrivenSource=0 overrides GP on the WU client
+    $srcFeature_GP  = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
+    $srcFeature_MDM = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
+    $srcQuality_GP  = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
+    $srcQuality_MDM = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
+    $srcDriver_GP   = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
+    $srcDriver_MDM  = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
+    $srcOther_GP    = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
+    $srcOther_MDM   = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
 
-    # Value 0 = Windows Update (WUfB), Value 1 = WSUS
-    $featureFromWU = ($srcFeature -eq 0)
-    $qualityFromWU = ($srcQuality -eq 0)
-    $driverFromWU  = ($srcDriver -eq 0)
-    $otherFromWU   = ($srcOther -eq 0)
+    # Value 0 = Windows Update (WUfB), Value 1 = WSUS — either path having 0 means WUfB wins
+    $featureFromWU = ($srcFeature_GP -eq 0 -or $srcFeature_MDM -eq 0)
+    $qualityFromWU = ($srcQuality_GP -eq 0 -or $srcQuality_MDM -eq 0)
+    $driverFromWU  = ($srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0)
+    $otherFromWU   = ($srcOther_GP -eq 0 -or $srcOther_MDM -eq 0)
 
     # Build update source status lines for output
     $pdsStatus = @(
-        "  Feature updates sourced from:  $(if ($featureFromWU) { 'WUfB' } elseif ($null -eq $srcFeature) { 'NOT CONFIGURED' } else { 'WSUS' })"
-        "  Quality updates sourced from:  $(if ($qualityFromWU) { 'WUfB' } elseif ($null -eq $srcQuality) { 'NOT CONFIGURED' } else { 'WSUS' })"
-        "  Driver updates sourced from:   $(if ($driverFromWU)  { 'WUfB' } elseif ($null -eq $srcDriver)  { 'NOT CONFIGURED' } else { 'WSUS' })"
-        "  Other updates sourced from:    $(if ($otherFromWU)   { 'WUfB' } elseif ($null -eq $srcOther)   { 'NOT CONFIGURED' } else { 'WSUS' })"
+        "  Feature updates sourced from:  $(if ($featureFromWU) { 'WUfB' } elseif ($null -eq $srcFeature_GP -and $null -eq $srcFeature_MDM) { 'NOT CONFIGURED' } else { 'WSUS' })"
+        "  Quality updates sourced from:  $(if ($qualityFromWU) { 'WUfB' } elseif ($null -eq $srcQuality_GP -and $null -eq $srcQuality_MDM) { 'NOT CONFIGURED' } else { 'WSUS' })"
+        "  Driver updates sourced from:   $(if ($driverFromWU)  { 'WUfB' } elseif ($null -eq $srcDriver_GP -and $null -eq $srcDriver_MDM)  { 'NOT CONFIGURED' } else { 'WSUS' })"
+        "  Other updates sourced from:    $(if ($otherFromWU)   { 'WUfB' } elseif ($null -eq $srcOther_GP -and $null -eq $srcOther_MDM)   { 'NOT CONFIGURED' } else { 'WSUS' })"
     )
 
     # PolicyDrivenSource status is shown in its own section — not duplicated in indicators
@@ -324,22 +328,22 @@ try {
 
     # --- 4. Compliance Deadlines ---
     # GP writes native names (ComplianceDeadlineForFU, ComplianceDeadline); MDM uses Configure* names
-    $deadlineFeature = Get-PolicyValue -Name 'ConfigureDeadlineForFeatureUpdates'
-    if ($null -eq $deadlineFeature) {
-        $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceDeadlineForFU'
-    }
-    $deadlineQuality = Get-PolicyValue -Name 'ConfigureDeadlineForQualityUpdates'
-    if ($null -eq $deadlineQuality) {
-        $deadlineQuality = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceDeadline'
-    }
-    $deadlineGrace   = Get-PolicyValue -Name 'ConfigureDeadlineGracePeriod'
-    if ($null -eq $deadlineGrace) {
-        $deadlineGrace = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceGracePeriod'
-    }
-    $deadlineGraceFU = Get-PolicyValue -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates'
-    if ($null -eq $deadlineGraceFU) {
-        $deadlineGraceFU = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceGracePeriodForFU'
-    }
+    # Read GP first (both naming conventions), then MDM fallback — matches WUDUP.ps1 pattern
+    $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ConfigureDeadlineForFeatureUpdates'
+    if ($null -eq $deadlineFeature) { $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceDeadlineForFU' }
+    if ($null -eq $deadlineFeature) { $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates' }
+
+    $deadlineQuality = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ConfigureDeadlineForQualityUpdates'
+    if ($null -eq $deadlineQuality) { $deadlineQuality = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceDeadline' }
+    if ($null -eq $deadlineQuality) { $deadlineQuality = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'ConfigureDeadlineForQualityUpdates' }
+
+    $deadlineGrace = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ConfigureDeadlineGracePeriod'
+    if ($null -eq $deadlineGrace) { $deadlineGrace = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceGracePeriod' }
+    if ($null -eq $deadlineGrace) { $deadlineGrace = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'ConfigureDeadlineGracePeriod' }
+
+    $deadlineGraceFU = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates'
+    if ($null -eq $deadlineGraceFU) { $deadlineGraceFU = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceGracePeriodForFU' }
+    if ($null -eq $deadlineGraceFU) { $deadlineGraceFU = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'ConfigureDeadlineGracePeriodForFeatureUpdates' }
 
     if ($null -ne $deadlineFeature) { $indicators += "Feature deadline:       $deadlineFeature days" }
     if ($null -ne $deadlineQuality) { $indicators += "Quality deadline:       $deadlineQuality days" }
@@ -475,11 +479,12 @@ try {
     if (-not $allPolicyDrivenToWU) {
         $problemLines = @()
         foreach ($type in @('Feature','Quality','Driver','Other')) {
-            $val = Get-Variable -Name "src$type" -ValueOnly
-            if ($null -eq $val) {
+            $gp  = Get-Variable -Name "src${type}_GP" -ValueOnly
+            $mdm = Get-Variable -Name "src${type}_MDM" -ValueOnly
+            if ($null -eq $gp -and $null -eq $mdm) {
                 $problemLines += "  - $type updates: not configured to use WUfB"
             }
-            elseif ($val -ne 0) {
+            elseif ($gp -ne 0 -and $mdm -ne 0) {
                 $problemLines += "  - $type updates: directed to WSUS instead of WUfB"
             }
         }

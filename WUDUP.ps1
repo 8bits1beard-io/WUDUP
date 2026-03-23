@@ -38,6 +38,8 @@ $script:RegPath_Enrollments  = 'HKLM:\SOFTWARE\Microsoft\Enrollments'
 $script:RegPath_WUAutoUpdate = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update'
 $script:RegPath_CBS          = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'
 
+$script:MDMProviderIDs = @('MS DM Server', 'WMI_Bridge_SCCM_Server')
+
 # ============================================================================
 #  LOOKUP TABLES
 # ============================================================================
@@ -148,11 +150,10 @@ function Test-ActiveMDMEnrollment {
     try {
         $subkeys = Get-ChildItem -Path $script:RegPath_Enrollments -ErrorAction SilentlyContinue
         foreach ($key in $subkeys) {
+            $providerID = Get-SafeRegistryValue -Path $key.PSPath -Name 'ProviderID'
+            if ($providerID -notin $script:MDMProviderIDs) { continue }
             $state = Get-SafeRegistryValue -Path $key.PSPath -Name 'EnrollmentState'
-            $provider = Get-SafeRegistryValue -Path $key.PSPath -Name 'ProviderID'
-            if ($state -eq 1 -and $null -ne $provider -and $provider -ne '') {
-                return $provider
-            }
+            if ($state -eq 1) { return $providerID }
         }
     }
     catch { }
@@ -242,7 +243,26 @@ function Get-UpdateStatus {
     $rebootCBS   = Test-Path "$script:RegPath_CBS\RebootPending"
 
     $lastInstall = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Install" -Name 'LastSuccessTime'
-    $lastDetect  = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Detect" -Name 'LastSuccessTime'
+
+    # Primary: COM update history (reliable on modern Windows, matches detect script)
+    $lastDetect = $null
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session
+        $searcher = $session.CreateUpdateSearcher()
+        $total = $searcher.GetTotalHistoryCount()
+        if ($total -gt 0) {
+            $latest = $searcher.QueryHistory(0, 1)
+            if ($null -ne $latest -and $latest.Count -gt 0 -and $latest.Item(0).Date -gt [DateTime]::MinValue) {
+                $lastDetect = $latest.Item(0).Date.ToString('yyyy-MM-dd HH:mm:ss')
+            }
+        }
+    }
+    catch { }
+    # Fallback: legacy registry (may be stale on modern Windows)
+    if ($null -eq $lastDetect) {
+        $lastDetect = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Detect" -Name 'LastSuccessTime'
+    }
+
     return [PSCustomObject]@{
         RebootRequired      = $rebootCOM      # Authoritative -- matches Settings app
         RebootRequiredWUReg = $rebootWUReg     # WU registry flag (supplemental)
