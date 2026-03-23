@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     WUDUP Detection Script - Checks if device is managed by Windows Update for Business.

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     WUDUP Remediation Script - Removes blockers so WUfB policy can take effect.
