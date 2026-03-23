@@ -95,6 +95,25 @@ function Remove-RegValue {
     }
 }
 
+function Format-Output {
+    param(
+        [string]$Result,       # REMEDIATED / SKIPPED / ERROR
+        [string]$Reason,       # One-line summary
+        [string[]]$Changes     # List of actions taken
+    )
+    $lines = @()
+    $lines += "=== WUDUP Remediation ==="
+    $lines += "$Result"
+    $lines += ""
+    $lines += "Reason: $Reason"
+    if ($Changes -and $Changes.Count -gt 0) {
+        $lines += ""
+        $lines += "Actions:"
+        foreach ($c in $Changes) { $lines += "  - $c" }
+    }
+    return ($lines -join "`n")
+}
+
 # ============================================================================
 #  REMEDIATION
 # ============================================================================
@@ -113,8 +132,10 @@ try {
         $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
 
         if (-not $wuShiftedToIntune -and -not $Config_AllowOnSCCM) {
-            $msg = "SKIPPED: SCCM/ConfigMgr manages WU workload. Local changes will be overwritten. Set Config_AllowOnSCCM=true to override."
-            Write-Log $msg
+            $msg = Format-Output -Result 'SKIPPED' `
+                -Reason "SCCM/ConfigMgr manages WU workload — local changes will be overwritten" `
+                -Changes @("Set Config_AllowOnSCCM=`$true to override")
+            Write-Log "SKIPPED: SCCM controls WU workload"
             Write-Output $msg
             exit 1
         }
@@ -229,9 +250,9 @@ try {
     $changes += 'Started WU services'
 
     # Trigger Intune to re-deliver policies (rebuilds PolicyManager entries)
-    $pushTask = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -eq 'PushLaunch' }
+    $pushTask = Get-ScheduledTask -TaskName 'PushLaunch' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -ne $pushTask) {
-        Start-ScheduledTask -InputObject $pushTask -ErrorAction SilentlyContinue
+        Start-ScheduledTask -TaskName $pushTask.TaskName -TaskPath $pushTask.TaskPath -ErrorAction SilentlyContinue
         $changes += 'Triggered Intune policy re-sync (PushLaunch)'
     }
 
@@ -245,15 +266,16 @@ try {
     }
 
     # --- Done ---
-    $summary = $changes -join '; '
-    $msg = "REMEDIATED: Blockers removed, WU state reset, device ready for WUfB policy. $summary"
-    Write-Log $msg
+    $msg = Format-Output -Result 'REMEDIATED' `
+        -Reason "Blockers removed, WU state reset — device ready for WUfB policy" `
+        -Changes $changes
+    Write-Log "REMEDIATED: $($changes -join '; ')"
     Write-Output $msg
     exit 0
 }
 catch {
-    $msg = "ERROR: Remediation failed - $($_.Exception.Message)"
-    Write-Log $msg
+    $msg = Format-Output -Result 'ERROR' -Reason "Remediation failed — $($_.Exception.Message)"
+    Write-Log "ERROR: $($_.Exception.Message)"
     Write-Output $msg
     exit 1
 }

@@ -599,16 +599,30 @@ function Get-ManagementAuthority {
             $result.IsGPOManaged = $true
             $result.CanModify = $true
         }
-        elseif ($wufbIndicators.Count -gt 0 -and (-not $hasWSUS -or $isSplitSource)) {
+        elseif ($allPolicyDrivenToWU -and (-not $hasWSUS -or $isSplitSource)) {
+            # All 4 PolicyDrivenSource keys = 0: WUfB fully controls update source
             if ($isSplitSource) {
                 $result.Authority = 'WUfB (split-source with WSUS)'
                 $result.Details = "WUfB controls updates via PolicyDrivenSource; WSUS also configured at $wuServer"
             }
             else {
                 $result.Authority = 'WUfB (Group Policy)'
-                $result.Details = "WUfB policies detected: $($wufbIndicators -join ', ')"
+                $result.Details = "All PolicyDrivenSource keys set to WU. WUfB indicators: $($wufbIndicators -join ', ')"
             }
             $result.IsWUfB = $true
+            $result.IsGPOManaged = $true
+            $result.CanModify = $true
+        }
+        elseif ($wufbIndicators.Count -gt 0 -and -not $hasWSUS) {
+            # WUfB policy indicators exist but PolicyDrivenSource keys are missing/incomplete
+            $missing = @()
+            if (-not $featureFromWU) { $missing += 'Feature' }
+            if (-not $qualityFromWU) { $missing += 'Quality' }
+            if (-not $driverFromWU)  { $missing += 'Driver' }
+            if (-not $otherFromWU)   { $missing += 'Other' }
+            $result.Authority = 'WUfB (incomplete - missing PolicyDrivenSource)'
+            $result.Details = "WUfB indicators present ($($wufbIndicators -join ', ')) but PolicyDrivenSource not set to WU for: $($missing -join ', ')"
+            $result.IsWUfB = $false
             $result.IsGPOManaged = $true
             $result.CanModify = $true
         }
