@@ -106,16 +106,21 @@ function Format-Output {
     param(
         [string]$Result,           # COMPLIANT / NON-COMPLIANT / ERROR
         [string]$Reason,           # One-line summary of why
+        [string[]]$Checks,         # Per-check results ([PASS]/[FAIL]/[SKIP] lines)
         [string[]]$Issues,         # What failed (shown under "Issues Found:")
         [string[]]$Remediation,    # What to fix (shown under "Remediation:")
-        [string[]]$UpdateSource,   # Update source status lines
         [string[]]$Policy,         # WUfB policy lines
-        [string[]]$Health,         # Health check lines
-        [switch]$HasBlockers       # Whether update blockers are present
+        [string[]]$Health          # Health check lines
     )
     $lines = @()
     $lines += "=== WUDUP Detection ==="
     $lines += "$Result — $Reason"
+
+    if ($Checks -and $Checks.Count -gt 0) {
+        $lines += ""
+        $lines += "Checks Performed:"
+        foreach ($c in $Checks) { $lines += $c }
+    }
 
     if ($Issues -and $Issues.Count -gt 0) {
         $lines += ""
@@ -127,17 +132,6 @@ function Format-Output {
         $lines += ""
         $lines += "Remediation:"
         foreach ($r in $Remediation) { $lines += "  $r" }
-    }
-
-    if ($UpdateSource -and $UpdateSource.Count -gt 0) {
-        $lines += ""
-        if ($HasBlockers) {
-            $lines += "Update Source (NOT functional — blockers must be removed first):"
-        }
-        else {
-            $lines += "Update Source:"
-        }
-        $lines += $UpdateSource
     }
 
     if ($Health -and $Health.Count -gt 0) {
@@ -292,8 +286,101 @@ function Get-LastWUScanStatus {
 try {
     Write-Log "Detection started"
     $indicators = @()
+    $checks = @()
 
-    # --- 1. Policy-Driven Update Source (most definitive, Windows 10 2004+) ---
+    # --- 1. Update Blocker Checks ---
+    # NoAutoUpdate=1 disables all automatic updates
+    $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
+    if ($noAutoUpdate -eq 1) {
+        $checks += "  [FAIL] NoAutoUpdate = 1 — automatic updates disabled"
+        $checks += "           $RegPath_AU\NoAutoUpdate"
+    }
+    else {
+        $checks += "  [PASS] NoAutoUpdate != 1                         ($RegPath_AU)"
+    }
+
+    # AUOptions=1 means "Never check for updates" — effectively disables WU
+    $auOptions = Get-SafeRegistryValue -Path $RegPath_AU -Name 'AUOptions'
+    if ($auOptions -eq 1) {
+        $checks += "  [FAIL] AUOptions = 1 — set to never check for updates"
+        $checks += "           $RegPath_AU\AUOptions"
+    }
+    else {
+        $checks += "  [PASS] AUOptions != 1                            ($RegPath_AU)"
+    }
+
+    # DoNotConnectToWindowsUpdateInternetLocations=1 blocks WU server connectivity
+    $noConnect = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DoNotConnectToWindowsUpdateInternetLocations'
+    if ($noConnect -eq 1) {
+        $checks += "  [FAIL] DoNotConnectToWindowsUpdateInternetLocations = 1 — WU connectivity blocked"
+        $checks += "           $RegPath_WU\DoNotConnectToWindowsUpdateInternetLocations"
+    }
+    else {
+        $checks += "  [PASS] DoNotConnectToWindowsUpdateInternetLocations != 1  ($RegPath_WU)"
+    }
+
+    # SetDisableUXWUAccess=1 hides WU UI and can block update flows
+    $disableUX = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetDisableUXWUAccess'
+    if ($disableUX -eq 1) {
+        $checks += "  [FAIL] SetDisableUXWUAccess = 1 — Windows Update UI/access disabled"
+        $checks += "           $RegPath_WU\SetDisableUXWUAccess"
+    }
+    else {
+        $checks += "  [PASS] SetDisableUXWUAccess != 1                 ($RegPath_WU)"
+    }
+
+    # Windows Update service (wuauserv) must not be disabled
+    $wuSvc = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
+    if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') {
+        $checks += "  [FAIL] wuauserv service Disabled — Windows Update cannot run"
+    }
+    else {
+        $checks += "  [PASS] wuauserv service enabled"
+    }
+
+    # Update Orchestrator Service (UsoSvc) must not be disabled
+    $usoSvc = Get-Service -Name 'UsoSvc' -ErrorAction SilentlyContinue
+    if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') {
+        $checks += "  [FAIL] UsoSvc service Disabled — Update Orchestrator cannot run"
+    }
+    else {
+        $checks += "  [PASS] UsoSvc service enabled"
+    }
+
+    $hasBlockers = (
+        $noAutoUpdate -eq 1 -or
+        $auOptions -eq 1 -or
+        $noConnect -eq 1 -or
+        $disableUX -eq 1 -or
+        ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') -or
+        ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled')
+    )
+
+    # --- 2. SCCM Detection ---
+    $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
+    $hasSCCM     = ($null -ne $sccmService -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'))
+
+    # Check co-management: if the WU workload is shifted to Intune (CoManagementFlags bit 16),
+    # SCCM no longer controls updates — evaluate as Intune-managed instead.
+    # Mirrors the co-management check in WUDUP-Remediate.ps1.
+    $wuShiftedToIntune = $false
+    if ($hasSCCM) {
+        $coMgmtFlags = Get-SafeRegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\CCM' -Name 'CoManagementFlags'
+        $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
+        if ($wuShiftedToIntune) {
+            $hasSCCM = $false
+        }
+    }
+
+    if ($hasSCCM) {
+        $checks += "  [FAIL] SCCM controlling updates — WU workload not shifted to Intune"
+        $checks += "           HKLM:\SOFTWARE\Microsoft\CCM\CoManagementFlags"
+    }
+    else {
+        $checks += "  [PASS] SCCM not controlling updates"
+    }
+
+    # --- 3. Policy-Driven Update Source (most definitive, Windows 10 2004+) ---
     # Read GP and MDM separately — MDM-delivered PolicyDrivenSource=0 overrides GP on the WU client
     $srcFeature_GP  = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
     $srcFeature_MDM = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
@@ -310,24 +397,118 @@ try {
     $driverFromWU  = ($srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0)
     $otherFromWU   = ($srcOther_GP -eq 0 -or $srcOther_MDM -eq 0)
 
-    # Build update source status lines for output
-    $pdsStatus = @(
-        "  Feature updates configured for:  $(if ($featureFromWU) { 'WUfB' } elseif ($null -eq $srcFeature_GP -and $null -eq $srcFeature_MDM) { 'NOT SET' } else { 'WSUS' })"
-        "  Quality updates configured for:  $(if ($qualityFromWU) { 'WUfB' } elseif ($null -eq $srcQuality_GP -and $null -eq $srcQuality_MDM) { 'NOT SET' } else { 'WSUS' })"
-        "  Driver updates configured for:   $(if ($driverFromWU)  { 'WUfB' } elseif ($null -eq $srcDriver_GP -and $null -eq $srcDriver_MDM)  { 'NOT SET' } else { 'WSUS' })"
-        "  Other updates configured for:    $(if ($otherFromWU)   { 'WUfB' } elseif ($null -eq $srcOther_GP -and $null -eq $srcOther_MDM)   { 'NOT SET' } else { 'WSUS' })"
-    )
+    # Build per-type check lines with registry path detail on FAIL
+    foreach ($type in @('Feature','Quality','Driver','Other')) {
+        $gpVal  = Get-Variable -Name "src${type}_GP" -ValueOnly
+        $mdmVal = Get-Variable -Name "src${type}_MDM" -ValueOnly
+        $fromWU = Get-Variable -Name "$($type.ToLower())FromWU" -ValueOnly
 
-    # PolicyDrivenSource status is shown in its own section — not duplicated in indicators
+        if ($fromWU) {
+            $source = if ($mdmVal -eq 0) { $RegPath_MDM } else { $RegPath_WU }
+            $checks += "  [PASS] PolicyDrivenSource $type = 0 (WUfB)    ($source)"
+        }
+        elseif ($null -eq $gpVal -and $null -eq $mdmVal) {
+            $checks += "  [FAIL] PolicyDrivenSource $type = NOT SET"
+            $checks += "           GP:  $RegPath_WU"
+            $checks += "           MDM: $RegPath_MDM"
+        }
+        else {
+            $checks += "  [FAIL] PolicyDrivenSource $type = WSUS (value 1), needs WUfB (value 0)"
+            $checks += "           GP:  $RegPath_WU"
+            $checks += "           MDM: $RegPath_MDM"
+        }
+    }
 
-    # --- 2. Deferral Policies ---
+    # --- 4. WSUS Configuration ---
+    $wuServer       = Get-SafeRegistryValue -Path $RegPath_WU -Name 'WUServer'
+    $wuStatusServer = Get-SafeRegistryValue -Path $RegPath_WU -Name 'WUStatusServer'
+    $useWUServer    = Get-SafeRegistryValue -Path $RegPath_AU -Name 'UseWUServer'
+    $hasWSUS        = ($useWUServer -eq 1 -and $null -ne $wuServer)
+
+    # --- 5. Dual-Scan Suppression ---
+    $disableDualScan = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DisableDualScan'
+
+    # ========================================================================
+    #  COLLECT HEALTH DATA (before compliance gates, so all exits have context)
+    # ========================================================================
+
+    $hasUpdateRing = Test-IntuneUpdateRingDelivered
+    $mdmHealth     = Test-MDMEnrollmentHealth
+    $scanStatus    = Get-LastWUScanStatus
+
+    # --- 6. Update Ring delivery ---
+    if (-not $Config_RequireUpdateRing) {
+        $checks += "  [SKIP] Update Ring check disabled (`$Config_RequireUpdateRing = `$false)"
+    }
+    elseif ($hasUpdateRing) {
+        $checks += "  [PASS] Intune Update Ring delivering policy"
+    }
+    else {
+        $checks += "  [FAIL] No Intune Update Ring delivering policy"
+        $checks += "           HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\<GUID>\default\device\Update"
+    }
+
+    # --- 7. MDM enrollment ---
+    if (-not $Config_RequireMDMEnrollment) {
+        $checks += "  [SKIP] MDM enrollment check disabled (`$Config_RequireMDMEnrollment = `$false)"
+    }
+    elseif ($mdmHealth.Enrolled) {
+        $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-management bridge' } else { 'Intune direct' }
+        $upnDisplay = if ($mdmHealth.UPN) { ", $($mdmHealth.UPN)" } else { '' }
+        $checks += "  [PASS] MDM enrollment active                     ($providerLabel$upnDisplay)"
+    }
+    else {
+        $checks += "  [FAIL] No active MDM enrollment — device cannot receive WUfB policy"
+        $checks += "           HKLM:\SOFTWARE\Microsoft\Enrollments"
+    }
+
+    # --- 8. WU scan freshness ---
+    if ($Config_MaxScanAgeDays -le 0) {
+        $checks += "  [SKIP] WU scan freshness check disabled (`$Config_MaxScanAgeDays = 0)"
+    }
+    elseif ($null -eq $scanStatus.AgeDays) {
+        $checks += "  [PASS] WU scan age unknown (no history available)"
+    }
+    elseif ($scanStatus.AgeDays -gt $Config_MaxScanAgeDays) {
+        $checks += "  [FAIL] WU scan stale — $($scanStatus.AgeDays) days ago (threshold: $Config_MaxScanAgeDays)"
+    }
+    else {
+        $checks += "  [PASS] WU scan current                           ($($scanStatus.AgeDays) days ago, threshold: $Config_MaxScanAgeDays)"
+    }
+
+    # ========================================================================
+    #  COLLECT HEALTH SUMMARY
+    # ========================================================================
+
+    $healthLines = @()
+    $healthLines += "Update Ring:    $(if ($hasUpdateRing) { 'Active' } else { 'Not detected' })"
+    if ($mdmHealth.Enrolled) {
+        $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-management bridge' } else { 'Intune direct' }
+        $upnDisplay = if ($mdmHealth.UPN) { " ($($mdmHealth.UPN))" } else { '' }
+        $healthLines += "MDM:            Enrolled via $providerLabel$upnDisplay"
+    }
+    else {
+        $healthLines += "MDM:            Not enrolled"
+    }
+    if ($null -ne $scanStatus.AgeDays) {
+        $healthLines += "Last WU scan:   $($scanStatus.AgeDays) days ago"
+    }
+    else {
+        $healthLines += "Last WU scan:   Unknown"
+    }
+
+    # ========================================================================
+    #  COLLECT WUfB POLICY INDICATORS (informational, not compliance gates)
+    # ========================================================================
+
+    # --- Deferral Policies ---
     $featureDefer = Get-PolicyValue -Name 'DeferFeatureUpdatesPeriodInDays'
     $qualityDefer = Get-PolicyValue -Name 'DeferQualityUpdatesPeriodInDays'
 
     if ($null -ne $featureDefer -and $featureDefer -gt 0) { $indicators += "Feature deferral:       $featureDefer days" }
     if ($null -ne $qualityDefer -and $qualityDefer -gt 0) { $indicators += "Quality deferral:       $qualityDefer days" }
 
-    # --- 3. Version Targeting ---
+    # --- Version Targeting ---
     # GP path: TargetReleaseVersion=1 (DWORD enable flag) + TargetReleaseVersionInfo="24H2" (REG_SZ)
     # MDM path: TargetReleaseVersion="24H2" (the version string itself, not a boolean)
     $targetEnabled = Get-PolicyValue -Name 'TargetReleaseVersion'
@@ -345,7 +526,7 @@ try {
     }
     if ($versionDisplay) { $indicators += "Version target:         $versionDisplay" }
 
-    # --- 4. Compliance Deadlines ---
+    # --- Compliance Deadlines ---
     # GP writes native names (ComplianceDeadlineForFU, ComplianceDeadline); MDM uses Configure* names
     # Read GP first (both naming conventions), then MDM fallback — matches WUDUP.ps1 pattern
     $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ConfigureDeadlineForFeatureUpdates'
@@ -369,7 +550,7 @@ try {
     if ($null -ne $deadlineGrace)   { $indicators += "Grace period:           $deadlineGrace days" }
     if ($null -ne $deadlineGraceFU) { $indicators += "Grace period (feature): $deadlineGraceFU days" }
 
-    # --- 5. Channel / Preview Build Management ---
+    # --- Channel / Preview Build Management ---
     $branchLevel = Get-PolicyValue -Name 'BranchReadinessLevel'
     $previewBuilds = Get-PolicyValue -Name 'ManagePreviewBuilds'
 
@@ -390,90 +571,11 @@ try {
         $indicators += "Preview builds:         $previewName"
     }
 
-    # --- 6. Driver Exclusion ---
+    # --- Driver Exclusion ---
     $excludeDrivers = Get-PolicyValue -Name 'ExcludeWUDriversInQualityUpdate'
     if ($null -ne $excludeDrivers) {
         $driverName = if ($excludeDrivers -eq 1) { 'Excluded from quality updates' } else { 'Included in quality updates' }
         $indicators += "Driver updates:         $driverName"
-    }
-
-    # --- 7. Update Blocker Checks ---
-    $blockers = @()
-
-    # NoAutoUpdate=1 disables all automatic updates
-    $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
-    if ($noAutoUpdate -eq 1) { $blockers += 'NoAutoUpdate=1 in AU subkey — automatic updates are disabled' }
-
-    # AUOptions=1 means "Never check for updates" — effectively disables WU
-    $auOptions = Get-SafeRegistryValue -Path $RegPath_AU -Name 'AUOptions'
-    if ($auOptions -eq 1) { $blockers += 'AUOptions=1 in AU subkey — set to never check for updates' }
-
-    # DoNotConnectToWindowsUpdateInternetLocations=1 blocks WU server connectivity
-    $noConnect = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DoNotConnectToWindowsUpdateInternetLocations'
-    if ($noConnect -eq 1) { $blockers += 'DoNotConnectToWindowsUpdateInternetLocations=1 — WU server connectivity blocked' }
-
-    # SetDisableUXWUAccess=1 hides WU UI and can block update flows
-    $disableUX = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetDisableUXWUAccess'
-    if ($disableUX -eq 1) { $blockers += 'SetDisableUXWUAccess=1 — Windows Update UI/access disabled' }
-
-    # Windows Update service (wuauserv) must not be disabled
-    $wuSvc = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
-    if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') { $blockers += 'wuauserv service startup set to Disabled — Windows Update cannot run' }
-
-    # Update Orchestrator Service (UsoSvc) must not be disabled
-    $usoSvc = Get-Service -Name 'UsoSvc' -ErrorAction SilentlyContinue
-    if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') { $blockers += 'UsoSvc service startup set to Disabled — Update Orchestrator cannot run' }
-
-    $hasBlockers = ($blockers.Count -gt 0)
-
-    # --- 8. WSUS Configuration ---
-    $wuServer       = Get-SafeRegistryValue -Path $RegPath_WU -Name 'WUServer'
-    $wuStatusServer = Get-SafeRegistryValue -Path $RegPath_WU -Name 'WUStatusServer'
-    $useWUServer    = Get-SafeRegistryValue -Path $RegPath_AU -Name 'UseWUServer'
-    $hasWSUS        = ($useWUServer -eq 1 -and $null -ne $wuServer)
-
-    # --- 9. Dual-Scan Suppression ---
-    $disableDualScan = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DisableDualScan'
-
-    # --- 10. SCCM Detection ---
-    $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
-    $hasSCCM     = ($null -ne $sccmService -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'))
-
-    # Check co-management: if the WU workload is shifted to Intune (CoManagementFlags bit 16),
-    # SCCM no longer controls updates — evaluate as Intune-managed instead.
-    # Mirrors the co-management check in WUDUP-Remediate.ps1.
-    $wuShiftedToIntune = $false
-    if ($hasSCCM) {
-        $coMgmtFlags = Get-SafeRegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\CCM' -Name 'CoManagementFlags'
-        $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
-        if ($wuShiftedToIntune) {
-            $hasSCCM = $false
-        }
-    }
-
-    # ========================================================================
-    #  COLLECT HEALTH DATA (before compliance gates, so all exits have context)
-    # ========================================================================
-
-    $hasUpdateRing = Test-IntuneUpdateRingDelivered
-    $mdmHealth     = Test-MDMEnrollmentHealth
-    $scanStatus    = Get-LastWUScanStatus
-
-    $healthLines = @()
-    $healthLines += "Update Ring:    $(if ($hasUpdateRing) { 'Active' } else { 'Not detected' })"
-    if ($mdmHealth.Enrolled) {
-        $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-management bridge' } else { 'Intune direct' }
-        $upnDisplay = if ($mdmHealth.UPN) { " ($($mdmHealth.UPN))" } else { '' }
-        $healthLines += "MDM:            Enrolled via $providerLabel$upnDisplay"
-    }
-    else {
-        $healthLines += "MDM:            Not enrolled"
-    }
-    if ($null -ne $scanStatus.AgeDays) {
-        $healthLines += "Last WU scan:   $($scanStatus.AgeDays) days ago"
-    }
-    else {
-        $healthLines += "Last WU scan:   Unknown"
     }
 
     # ========================================================================
@@ -486,9 +588,12 @@ try {
 
     # --- Check 1: Update blockers ---
     if ($hasBlockers) {
-        foreach ($b in $blockers) {
-            $issues += $b
-        }
+        if ($noAutoUpdate -eq 1) { $issues += 'NoAutoUpdate=1 in AU subkey — automatic updates are disabled' }
+        if ($auOptions -eq 1)    { $issues += 'AUOptions=1 in AU subkey — set to never check for updates' }
+        if ($noConnect -eq 1)    { $issues += 'DoNotConnectToWindowsUpdateInternetLocations=1 — WU server connectivity blocked' }
+        if ($disableUX -eq 1)    { $issues += 'SetDisableUXWUAccess=1 — Windows Update UI/access disabled' }
+        if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled')  { $issues += 'wuauserv service startup set to Disabled — Windows Update cannot run' }
+        if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') { $issues += 'UsoSvc service startup set to Disabled — Update Orchestrator cannot run' }
         $remediation += "Remove update blockers (remediation script handles this automatically)"
     }
 
@@ -517,7 +622,7 @@ try {
     }
 
     # --- Check 4: Update Ring delivery ---
-    if (-not $hasUpdateRing -and $Config_RequireUpdateRing) {
+    if ($Config_RequireUpdateRing -and -not $hasUpdateRing) {
         $issues += "No Intune WUfB Update Ring is actively delivering policy to this device"
         $remediation += "Assign a WUfB Update Ring to this device in Intune"
     }
@@ -539,12 +644,11 @@ try {
         $reason = "$($issues.Count) issue$(if ($issues.Count -gt 1) { 's' }) found — device is not WUfB compliant"
         $msg = Format-Output -Result 'NON-COMPLIANT' `
             -Reason $reason `
+            -Checks $checks `
             -Issues $issues `
             -Remediation $remediation `
-            -UpdateSource $pdsStatus `
             -Health $healthLines `
-            -Policy $indicators `
-            -HasBlockers:$hasBlockers
+            -Policy $indicators
         Write-Log "NON-COMPLIANT: $($issues -join '; ')"
         Write-Output $msg
         exit 1
@@ -557,8 +661,8 @@ try {
     }
     $msg = Format-Output -Result 'COMPLIANT' `
         -Reason 'WUfB is managing all update types on this device' `
+        -Checks $checks `
         -Issues $notes `
-        -UpdateSource $pdsStatus `
         -Health $healthLines `
         -Policy $indicators
     Write-Log "COMPLIANT"
