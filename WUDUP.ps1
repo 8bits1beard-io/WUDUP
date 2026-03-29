@@ -242,25 +242,44 @@ function Get-UpdateStatus {
     $rebootWUReg = Test-Path "$script:RegPath_WUAutoUpdate\RebootRequired"
     $rebootCBS   = Test-Path "$script:RegPath_CBS\RebootPending"
 
-    $lastInstall = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Install" -Name 'LastSuccessTime'
-
-    # Primary: COM update history (reliable on modern Windows, matches detect script)
+    # Primary: COM Microsoft.Update.AutoUpdate — actual scan/install timestamps (matches detect script)
     $lastDetect = $null
+    $lastInstall = $null
     try {
-        $session = New-Object -ComObject Microsoft.Update.Session
-        $searcher = $session.CreateUpdateSearcher()
-        $total = $searcher.GetTotalHistoryCount()
-        if ($total -gt 0) {
-            $latest = $searcher.QueryHistory(0, 1)
-            if ($null -ne $latest -and $latest.Count -gt 0 -and $latest.Item(0).Date -gt [DateTime]::MinValue) {
-                $lastDetect = $latest.Item(0).Date.ToString('yyyy-MM-dd HH:mm:ss')
-            }
+        $autoUpdate = New-Object -ComObject Microsoft.Update.AutoUpdate
+        $searchDate = $autoUpdate.Results.LastSearchSuccessDate
+        if ($null -ne $searchDate -and $searchDate -gt [DateTime]::MinValue) {
+            $lastDetect = $searchDate.ToString('yyyy-MM-dd HH:mm:ss')
+        }
+        $installDate = $autoUpdate.Results.LastInstallationSuccessDate
+        if ($null -ne $installDate -and $installDate -gt [DateTime]::MinValue) {
+            $lastInstall = $installDate.ToString('yyyy-MM-dd HH:mm:ss')
         }
     }
     catch { }
-    # Fallback: legacy registry (may be stale on modern Windows)
+
+    # Secondary fallback: COM update history (checks install events, not scan events)
+    if ($null -eq $lastDetect) {
+        try {
+            $session = New-Object -ComObject Microsoft.Update.Session
+            $searcher = $session.CreateUpdateSearcher()
+            $total = $searcher.GetTotalHistoryCount()
+            if ($total -gt 0) {
+                $latest = $searcher.QueryHistory(0, 1)
+                if ($null -ne $latest -and $latest.Count -gt 0 -and $latest.Item(0).Date -gt [DateTime]::MinValue) {
+                    $lastDetect = $latest.Item(0).Date.ToString('yyyy-MM-dd HH:mm:ss')
+                }
+            }
+        }
+        catch { }
+    }
+
+    # Tertiary fallback: legacy registry (may be stale on modern Windows)
     if ($null -eq $lastDetect) {
         $lastDetect = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Detect" -Name 'LastSuccessTime'
+    }
+    if ($null -eq $lastInstall) {
+        $lastInstall = Get-SafeRegistryValue -Path "$script:RegPath_WUAutoUpdate\Results\Install" -Name 'LastSuccessTime'
     }
 
     return [PSCustomObject]@{
@@ -585,11 +604,25 @@ function Get-ManagementAuthority {
     $disableUX = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'SetDisableUXWUAccess'
     if ($disableUX -eq 1) { $blockers += 'SetDisableUXWUAccess=1' }
 
+    $disableWUAccess = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DisableWindowsUpdateAccess'
+    if ($disableWUAccess -eq 1) { $blockers += 'DisableWindowsUpdateAccess=1' }
+
+    $mdmAllowAutoUpdate = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'AllowAutoUpdate'
+    if ($mdmAllowAutoUpdate -eq 5) { $blockers += 'MDM AllowAutoUpdate=5 (auto updates disabled via MDM)' }
+
+    $mdmAllowUpdateService = Get-SafeRegistryValue -Path $script:RegPath_MDM -Name 'AllowUpdateService'
+    if ($mdmAllowUpdateService -eq 0) { $blockers += 'MDM AllowUpdateService=0 (all update services blocked via MDM)' }
+
     $wuSvc = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
     if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') { $blockers += 'wuauserv service Disabled' }
 
     $usoSvc = Get-Service -Name 'UsoSvc' -ErrorAction SilentlyContinue
     if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') { $blockers += 'UsoSvc service Disabled' }
+
+    # Orphaned UseWUServer=1 with no WUServer — WU client points at nothing
+    if ($useWU -eq 1 -and ($null -eq $wuServer -or $wuServer -eq '')) {
+        $blockers += 'UseWUServer=1 with no WUServer (orphaned)'
+    }
 
     $result.Blockers = $blockers
     $result.AutoUpdateDisabled = ($blockers.Count -gt 0)
@@ -792,6 +825,10 @@ function Get-UpdatePolicies {
     elseif ($null -ne $mdmQualityDefer)  { $qualityDefer = $mdmQualityDefer; $qualitySource = 'MDM' }
     else                                 { $qualityDefer = $null;            $qualitySource = $null }
 
+    # GP deferral enable flags — separate from the period values
+    $featureDeferEnabled = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DeferFeatureUpdates'
+    $qualityDeferEnabled = Get-SafeRegistryValue -Path $script:RegPath_WU -Name 'DeferQualityUpdates'
+
     # --- Auto Update Behavior ---
     $noAutoUpdate = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'NoAutoUpdate'
     $auOptions = Get-SafeRegistryValue -Path $script:RegPath_AU -Name 'AUOptions'
@@ -889,8 +926,10 @@ function Get-UpdatePolicies {
         # Deferrals
         FeatureDeferralDays      = $featureDefer
         FeatureDeferralSource    = $featureSource
+        FeatureDeferEnabled      = $featureDeferEnabled
         QualityDeferralDays      = $qualityDefer
         QualityDeferralSource    = $qualitySource
+        QualityDeferEnabled      = $qualityDeferEnabled
         # Compliance Deadlines
         DeadlineFeatureDays      = $deadlineFeature
         DeadlineQualityDays      = $deadlineQuality
@@ -1079,6 +1118,16 @@ function Show-UpdateReport {
         Write-Host ""
         Write-Host "    WARNING: Update Orchestrator is disabled - updates cannot be initiated." -ForegroundColor Red
     }
+    $cryptSvc = Get-Service -Name 'cryptsvc' -ErrorAction SilentlyContinue
+    if ($null -ne $cryptSvc) {
+        $csColor = if ($cryptSvc.StartType -eq 'Disabled') { 'Red' } else { 'Green' }
+        Write-ReportLine "Cryptographic Svc (cryptsvc)" "$($cryptSvc.Status) / $($cryptSvc.StartType)" $csColor
+    }
+    $tiSvc = Get-Service -Name 'TrustedInstaller' -ErrorAction SilentlyContinue
+    if ($null -ne $tiSvc) {
+        $tiColor = if ($tiSvc.StartType -eq 'Disabled') { 'Red' } else { 'Green' }
+        Write-ReportLine "Trusted Installer" "$($tiSvc.Status) / $($tiSvc.StartType)" $tiColor
+    }
 
     # --- Update Status ---
     Write-Section "Update Status"
@@ -1196,7 +1245,11 @@ function Show-UpdateReport {
     if ($null -ne $Policies.FeatureDeferralDays) {
         $fColor = 'Green'
         if ($Policies.FeatureDeferralDays -eq 0) { $fColor = 'Yellow' }
+        if ($Policies.FeatureDeferEnabled -eq 0 -and $Policies.FeatureDeferralDays -gt 0) { $fColor = 'Yellow' }
         Write-ReportLine "Feature Update Deferral" "$($Policies.FeatureDeferralDays) days" $fColor "[Source: $($Policies.FeatureDeferralSource)]"
+        if ($Policies.FeatureDeferEnabled -eq 0 -and $Policies.FeatureDeferralDays -gt 0) {
+            Write-Host "    WARNING: DeferFeatureUpdates enable flag is 0 — deferral may not be active" -ForegroundColor Yellow
+        }
     }
     else {
         Write-ReportLine "Feature Update Deferral" "Not configured (0 days)" 'DarkGray'
@@ -1205,7 +1258,11 @@ function Show-UpdateReport {
     if ($null -ne $Policies.QualityDeferralDays) {
         $qColor = 'Green'
         if ($Policies.QualityDeferralDays -eq 0) { $qColor = 'Yellow' }
+        if ($Policies.QualityDeferEnabled -eq 0 -and $Policies.QualityDeferralDays -gt 0) { $qColor = 'Yellow' }
         Write-ReportLine "Quality Update Deferral" "$($Policies.QualityDeferralDays) days" $qColor "[Source: $($Policies.QualityDeferralSource)]"
+        if ($Policies.QualityDeferEnabled -eq 0 -and $Policies.QualityDeferralDays -gt 0) {
+            Write-Host "    WARNING: DeferQualityUpdates enable flag is 0 — deferral may not be active" -ForegroundColor Yellow
+        }
     }
     else {
         Write-ReportLine "Quality Update Deferral" "Not configured (0 days)" 'DarkGray'
@@ -1430,7 +1487,11 @@ function Show-UpdateReport {
     if ($null -ne $Policies.DODownloadMode) {
         $doDesc = $script:DODownloadModeMap[[int]$Policies.DODownloadMode]
         if ($null -eq $doDesc) { $doDesc = "Unknown ($($Policies.DODownloadMode))" }
-        Write-ReportLine "Download Mode" "$($Policies.DODownloadMode) - $doDesc" 'White' "[Source: $($Policies.DOSource)]"
+        $doColor = if ([int]$Policies.DODownloadMode -eq 100) { 'Red' } else { 'White' }
+        Write-ReportLine "Download Mode" "$($Policies.DODownloadMode) - $doDesc" $doColor "[Source: $($Policies.DOSource)]"
+        if ([int]$Policies.DODownloadMode -eq 100) {
+            Write-Host "    WARNING: Mode 100 (Bypass) is deprecated on Windows 11 and may cause download failures." -ForegroundColor Red
+        }
     }
     else {
         Write-ReportLine "Download Mode" "Default (OS-managed)" 'DarkGray'
@@ -2074,7 +2135,8 @@ function Show-SourceChangePreview {
 function Get-WSUSCleanupItems {
     $items = @()
     $wsusValues = @('WUServer', 'WUStatusServer', 'UpdateServiceUrlAlternate',
-                    'DoNotConnectToWindowsUpdateInternetLocations', 'SetDisableUXWUAccess')
+                    'DoNotConnectToWindowsUpdateInternetLocations', 'SetDisableUXWUAccess',
+                    'DisableWindowsUpdateAccess')
     foreach ($v in $wsusValues) {
         $current = Get-SafeRegistryValue -Path $script:RegPath_WU -Name $v
         if ($null -ne $current) {

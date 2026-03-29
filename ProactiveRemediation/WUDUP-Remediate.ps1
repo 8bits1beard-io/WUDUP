@@ -148,6 +148,17 @@ try {
         }
     }
 
+    # --- Step 0b: Check for MDM-delivered blockers that remediation cannot fix ---
+    $mdmPath = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update'
+    $mdmAllowAutoUpdate = Get-SafeRegistryValue -Path $mdmPath -Name 'AllowAutoUpdate'
+    if ($mdmAllowAutoUpdate -eq 5) {
+        $changes += 'WARNING: MDM AllowAutoUpdate=5 — auto updates disabled via Intune, review device config profiles'
+    }
+    $mdmAllowUpdateService = Get-SafeRegistryValue -Path $mdmPath -Name 'AllowUpdateService'
+    if ($mdmAllowUpdateService -eq 0) {
+        $changes += 'WARNING: MDM AllowUpdateService=0 — all update services blocked via Intune, review device config profiles'
+    }
+
     # --- Step 1: Stop WU-related services before making changes ---
     # Prevents cached in-memory state from overriding registry changes
     $stopServices = @('wuauserv', 'bits', 'UsoSvc')
@@ -165,6 +176,7 @@ try {
         @{ Path = $RegPath_WU; Name = 'WUStatusServer' },
         @{ Path = $RegPath_WU; Name = 'DoNotConnectToWindowsUpdateInternetLocations' },
         @{ Path = $RegPath_WU; Name = 'SetDisableUXWUAccess' },
+        @{ Path = $RegPath_WU; Name = 'DisableWindowsUpdateAccess' },
         @{ Path = $RegPath_WU; Name = 'UpdateServiceUrlAlternate' },
         @{ Path = $RegPath_AU; Name = 'UseWUServer' }
     )

@@ -68,9 +68,11 @@ $Config_MaxScanAgeDays = 7
 #  REGISTRY PATHS
 # ============================================================================
 
-$RegPath_WU  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
-$RegPath_AU  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
-$RegPath_MDM = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update'
+$RegPath_WU        = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+$RegPath_AU        = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+$RegPath_MDM       = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update'
+$RegPath_DO_Policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'
+$RegPath_DO_MDM    = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\DeliveryOptimization'
 
 # ============================================================================
 #  HELPERS
@@ -246,34 +248,52 @@ function Test-MDMEnrollmentHealth {
 #   LastScan  = [DateTime]|$null  — timestamp of last WU activity
 #   AgeDays   = [int]|$null       — days since last activity
 function Get-LastWUScanStatus {
-    $result = @{ LastScan = $null; AgeDays = $null }
+    $result = @{ LastScan = $null; AgeDays = $null; LastInstall = $null }
 
-    # Primary: COM update history — works regardless of which service triggered the scan
+    # Primary: COM Microsoft.Update.AutoUpdate — actual scan timestamp (not install history)
     try {
-        $session = New-Object -ComObject Microsoft.Update.Session
-        $searcher = $session.CreateUpdateSearcher()
-        $total = $searcher.GetTotalHistoryCount()
-        if ($total -gt 0) {
-            $latest = $searcher.QueryHistory(0, 1)
-            if ($null -ne $latest -and $latest.Count -gt 0 -and $latest.Item(0).Date -gt [DateTime]::MinValue) {
-                $result.LastScan = $latest.Item(0).Date
-                $result.AgeDays = [math]::Floor(((Get-Date) - $result.LastScan).TotalDays)
-                return $result
-            }
+        $autoUpdate = New-Object -ComObject Microsoft.Update.AutoUpdate
+        $searchDate = $autoUpdate.Results.LastSearchSuccessDate
+        if ($null -ne $searchDate -and $searchDate -gt [DateTime]::MinValue) {
+            $result.LastScan = $searchDate
+            $result.AgeDays = [math]::Floor(((Get-Date) - $searchDate).TotalDays)
+        }
+        $installDate = $autoUpdate.Results.LastInstallationSuccessDate
+        if ($null -ne $installDate -and $installDate -gt [DateTime]::MinValue) {
+            $result.LastInstall = $installDate
         }
     }
     catch { }
 
-    # Fallback: legacy Auto Update registry path (may be stale on modern Windows)
-    $detectPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Detect'
-    $lastSuccess = Get-SafeRegistryValue -Path $detectPath -Name 'LastSuccessTime'
-    if ($null -ne $lastSuccess) {
+    # Secondary fallback: COM update history (checks install events, not scan events)
+    if ($null -eq $result.LastScan) {
         try {
-            $scanTime = [DateTime]::Parse($lastSuccess)
-            $result.LastScan = $scanTime
-            $result.AgeDays = [math]::Floor(((Get-Date) - $scanTime).TotalDays)
+            $session = New-Object -ComObject Microsoft.Update.Session
+            $searcher = $session.CreateUpdateSearcher()
+            $total = $searcher.GetTotalHistoryCount()
+            if ($total -gt 0) {
+                $latest = $searcher.QueryHistory(0, 1)
+                if ($null -ne $latest -and $latest.Count -gt 0 -and $latest.Item(0).Date -gt [DateTime]::MinValue) {
+                    $result.LastScan = $latest.Item(0).Date
+                    $result.AgeDays = [math]::Floor(((Get-Date) - $result.LastScan).TotalDays)
+                }
+            }
         }
         catch { }
+    }
+
+    # Tertiary fallback: legacy Auto Update registry path (may be stale on modern Windows)
+    if ($null -eq $result.LastScan) {
+        $detectPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Detect'
+        $lastSuccess = Get-SafeRegistryValue -Path $detectPath -Name 'LastSuccessTime'
+        if ($null -ne $lastSuccess) {
+            try {
+                $scanTime = [DateTime]::Parse($lastSuccess)
+                $result.LastScan = $scanTime
+                $result.AgeDays = [math]::Floor(((Get-Date) - $scanTime).TotalDays)
+            }
+            catch { }
+        }
     }
 
     return $result
@@ -329,6 +349,37 @@ try {
         $checks += "  [PASS] SetDisableUXWUAccess != 1                 ($RegPath_WU)"
     }
 
+    # DisableWindowsUpdateAccess=1 turns off access to all Windows Update features
+    # Separate from SetDisableUXWUAccess — Microsoft Autopatch checks for this specifically
+    $disableWUAccess = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DisableWindowsUpdateAccess'
+    if ($disableWUAccess -eq 1) {
+        $checks += "  [FAIL] DisableWindowsUpdateAccess = 1 — all Windows Update features disabled"
+        $checks += "           $RegPath_WU\DisableWindowsUpdateAccess"
+    }
+    else {
+        $checks += "  [PASS] DisableWindowsUpdateAccess != 1            ($RegPath_WU)"
+    }
+
+    # MDM AllowAutoUpdate=5 disables automatic updates via Intune/MDM policy
+    $mdmAllowAutoUpdate = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'AllowAutoUpdate'
+    if ($mdmAllowAutoUpdate -eq 5) {
+        $checks += "  [FAIL] MDM AllowAutoUpdate = 5 — automatic updates disabled via MDM policy"
+        $checks += "           $RegPath_MDM\AllowAutoUpdate"
+    }
+    else {
+        $checks += "  [PASS] MDM AllowAutoUpdate != 5                   ($RegPath_MDM)"
+    }
+
+    # MDM AllowUpdateService=0 blocks device from using WU/WSUS/Store entirely
+    $mdmAllowUpdateService = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'AllowUpdateService'
+    if ($mdmAllowUpdateService -eq 0) {
+        $checks += "  [FAIL] MDM AllowUpdateService = 0 — all update services blocked via MDM policy"
+        $checks += "           $RegPath_MDM\AllowUpdateService"
+    }
+    else {
+        $checks += "  [PASS] MDM AllowUpdateService != 0                ($RegPath_MDM)"
+    }
+
     # Windows Update service (wuauserv) must not be disabled
     $wuSvc = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
     if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') {
@@ -347,11 +398,15 @@ try {
         $checks += "  [PASS] UsoSvc service enabled"
     }
 
+    # Note: $orphanedUseWUServer is evaluated after WSUS section and added to $hasBlockers there
     $hasBlockers = (
         $noAutoUpdate -eq 1 -or
         $auOptions -eq 1 -or
         $noConnect -eq 1 -or
         $disableUX -eq 1 -or
+        $disableWUAccess -eq 1 -or
+        $mdmAllowAutoUpdate -eq 5 -or
+        $mdmAllowUpdateService -eq 0 -or
         ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') -or
         ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled')
     )
@@ -425,6 +480,14 @@ try {
     $useWUServer    = Get-SafeRegistryValue -Path $RegPath_AU -Name 'UseWUServer'
     $hasWSUS        = ($useWUServer -eq 1 -and $null -ne $wuServer)
 
+    # Orphaned UseWUServer=1 without a valid WUServer — WU client points at nothing
+    $orphanedUseWUServer = ($useWUServer -eq 1 -and ($null -eq $wuServer -or $wuServer -eq ''))
+    if ($orphanedUseWUServer) {
+        $checks += "  [FAIL] UseWUServer=1 but WUServer is empty — updates cannot reach any server"
+        $checks += "           $RegPath_AU\UseWUServer"
+        $hasBlockers = $true
+    }
+
     # --- 5. Dual-Scan Suppression ---
     $disableDualScan = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DisableDualScan'
 
@@ -496,6 +559,42 @@ try {
     else {
         $healthLines += "Last WU scan:   Unknown"
     }
+    if ($null -ne $scanStatus.LastInstall) {
+        $healthLines += "Last install:   $($scanStatus.LastInstall.ToString('yyyy-MM-dd HH:mm'))"
+    }
+
+    # Pending reboot detection — informational, not a compliance gate
+    $pendingReboot = $false
+    try {
+        $sysInfo = New-Object -ComObject Microsoft.Update.SystemInfo
+        $pendingReboot = [bool]$sysInfo.RebootRequired
+    }
+    catch { }
+    if (-not $pendingReboot) {
+        $pendingReboot = (
+            (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') -or
+            (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+        )
+    }
+    $healthLines += "Pending reboot: $(if ($pendingReboot) { 'Yes' } else { 'No' })"
+
+    # Delivery Optimization mode — warn if mode 100 (Bypass, deprecated on Win11)
+    $doGP  = Get-SafeRegistryValue -Path $RegPath_DO_Policy -Name 'DownloadMode'
+    $doMDM = Get-SafeRegistryValue -Path $RegPath_DO_MDM -Name 'DODownloadMode'
+    $doMode = if ($null -ne $doGP) { $doGP } elseif ($null -ne $doMDM) { $doMDM } else { $null }
+    if ($doMode -eq 100) {
+        $healthLines += "DO Mode:        100 (Bypass) — DEPRECATED on Win11, may cause download failures"
+    }
+
+    # Supporting services — warn only if Disabled (not compliance gates)
+    $cryptSvc = Get-Service -Name 'cryptsvc' -ErrorAction SilentlyContinue
+    if ($null -ne $cryptSvc -and $cryptSvc.StartType -eq 'Disabled') {
+        $healthLines += "cryptsvc:       Disabled — certificate/signature verification may fail"
+    }
+    $tiSvc = Get-Service -Name 'TrustedInstaller' -ErrorAction SilentlyContinue
+    if ($null -ne $tiSvc -and $tiSvc.StartType -eq 'Disabled') {
+        $healthLines += "TrustedInstaller: Disabled — pending servicing transactions may be blocked"
+    }
 
     # ========================================================================
     #  COLLECT WUfB POLICY INDICATORS (informational, not compliance gates)
@@ -505,8 +604,26 @@ try {
     $featureDefer = Get-PolicyValue -Name 'DeferFeatureUpdatesPeriodInDays'
     $qualityDefer = Get-PolicyValue -Name 'DeferQualityUpdatesPeriodInDays'
 
-    if ($null -ne $featureDefer -and $featureDefer -gt 0) { $indicators += "Feature deferral:       $featureDefer days" }
-    if ($null -ne $qualityDefer -and $qualityDefer -gt 0) { $indicators += "Quality deferral:       $qualityDefer days" }
+    # Check deferral enable flags — GP has separate enable flags alongside the period values
+    $featureDeferEnabled = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DeferFeatureUpdates'
+    $qualityDeferEnabled = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DeferQualityUpdates'
+
+    if ($null -ne $featureDefer -and $featureDefer -gt 0) {
+        if ($featureDeferEnabled -eq 0) {
+            $indicators += "Feature deferral:       $featureDefer days (WARNING: DeferFeatureUpdates enable flag = 0)"
+        }
+        else {
+            $indicators += "Feature deferral:       $featureDefer days"
+        }
+    }
+    if ($null -ne $qualityDefer -and $qualityDefer -gt 0) {
+        if ($qualityDeferEnabled -eq 0) {
+            $indicators += "Quality deferral:       $qualityDefer days (WARNING: DeferQualityUpdates enable flag = 0)"
+        }
+        else {
+            $indicators += "Quality deferral:       $qualityDefer days"
+        }
+    }
 
     # --- Version Targeting ---
     # GP path: TargetReleaseVersion=1 (DWORD enable flag) + TargetReleaseVersionInfo="24H2" (REG_SZ)
@@ -588,13 +705,27 @@ try {
 
     # --- Check 1: Update blockers ---
     if ($hasBlockers) {
-        if ($noAutoUpdate -eq 1) { $issues += 'NoAutoUpdate=1 in AU subkey — automatic updates are disabled' }
-        if ($auOptions -eq 1)    { $issues += 'AUOptions=1 in AU subkey — set to never check for updates' }
-        if ($noConnect -eq 1)    { $issues += 'DoNotConnectToWindowsUpdateInternetLocations=1 — WU server connectivity blocked' }
-        if ($disableUX -eq 1)    { $issues += 'SetDisableUXWUAccess=1 — Windows Update UI/access disabled' }
+        $hasMDMBlockers = $false
+        if ($noAutoUpdate -eq 1)   { $issues += 'NoAutoUpdate=1 in AU subkey — automatic updates are disabled' }
+        if ($auOptions -eq 1)      { $issues += 'AUOptions=1 in AU subkey — set to never check for updates' }
+        if ($noConnect -eq 1)      { $issues += 'DoNotConnectToWindowsUpdateInternetLocations=1 — WU server connectivity blocked' }
+        if ($disableUX -eq 1)      { $issues += 'SetDisableUXWUAccess=1 — Windows Update UI/access disabled' }
+        if ($disableWUAccess -eq 1) { $issues += 'DisableWindowsUpdateAccess=1 — all Windows Update features disabled' }
+        if ($mdmAllowAutoUpdate -eq 5) {
+            $issues += 'MDM AllowAutoUpdate=5 — automatic updates disabled via Intune/MDM policy'
+            $hasMDMBlockers = $true
+        }
+        if ($mdmAllowUpdateService -eq 0) {
+            $issues += 'MDM AllowUpdateService=0 — all update services blocked via Intune/MDM policy'
+            $hasMDMBlockers = $true
+        }
         if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled')  { $issues += 'wuauserv service startup set to Disabled — Windows Update cannot run' }
         if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') { $issues += 'UsoSvc service startup set to Disabled — Update Orchestrator cannot run' }
+        if ($orphanedUseWUServer) { $issues += 'UseWUServer=1 but WUServer is empty/null — WU client cannot reach any update server' }
         $remediation += "Remove update blockers (remediation script handles this automatically)"
+        if ($hasMDMBlockers) {
+            $remediation += "Review Intune device configuration profiles — MDM-delivered blockers cannot be fixed by remediation script"
+        }
     }
 
     # --- Check 2: SCCM controlling updates ---

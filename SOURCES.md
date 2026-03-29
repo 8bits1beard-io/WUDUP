@@ -38,12 +38,19 @@ This document catalogs every data source that WUDUP reads, organized by category
 - **Purpose**: Authoritative pending reboot status. This is the same source the Windows Settings app queries. More reliable than registry flags, which can be stale (especially CBS `RebootPending`). Registry flags are retained as supplemental detail.
 - **Used in**: `Get-UpdateStatus`
 
+### Microsoft.Update.AutoUpdate
+
+- **Method**: `New-Object -ComObject Microsoft.Update.AutoUpdate`
+- **Properties**: `Results.LastSearchSuccessDate` (DateTime), `Results.LastInstallationSuccessDate` (DateTime)
+- **Purpose**: Primary source for Windows Update scan and install timestamps. Returns the actual last successful scan date (not install history like `Microsoft.Update.Session.QueryHistory`). Used as the first-choice method for scan freshness checks, with `Microsoft.Update.Session` and legacy registry as fallbacks.
+- **Used in**: `Get-LastWUScanStatus` (Detect), `Get-UpdateStatus` (WUDUP.ps1)
+
 ### Microsoft.Update.Session
 
 - **Method**: `New-Object -ComObject Microsoft.Update.Session`
 - **Properties**: `CreateUpdateSearcher()` → searcher; `QueryHistory()` on the searcher object
-- **Purpose**: Queries the local Windows Update history log. Used to retrieve the last 10 installed/failed updates with title, date, and result code. Same data visible in Settings → Windows Update → Update History.
-- **Used in**: `Get-RecentUpdateHistory`
+- **Purpose**: Queries the local Windows Update history log. Used to retrieve the last 10 installed/failed updates with title, date, and result code. Same data visible in Settings → Windows Update → Update History. Also used as a secondary fallback for scan timestamp detection.
+- **Used in**: `Get-RecentUpdateHistory`, `Get-LastWUScanStatus` (fallback), `Get-UpdateStatus` (fallback)
 
 ### Microsoft.Update.ServiceManager
 
@@ -79,6 +86,7 @@ The primary location for Group Policy-delivered Windows Update settings. When In
 | `WUStatusServer` | REG_SZ | WSUS reporting server URL. Usually matches `WUServer`. |
 | `DoNotConnectToWindowsUpdateInternetLocations` | DWORD | When `1`, blocks the WU client from reaching public Microsoft endpoints. Only applies when WSUS is configured. Breaks Store connectivity. |
 | `SetDisableUXWUAccess` | DWORD | When `1`, hides the "Check for updates" button in Settings. Legacy on Windows 11 (no effect). |
+| `DisableWindowsUpdateAccess` | DWORD | When `1`, turns off access to all Windows Update features. Separate from `SetDisableUXWUAccess`. Microsoft Autopatch explicitly checks for this as a conflicting configuration. |
 | `SetPolicyDrivenUpdateSourceForFeatureUpdates` | DWORD | `0`=Windows Update (WUfB), `1`=WSUS. Most definitive WUfB signal on Windows 10 2004+/11. Added with KB5005101 (Sept 2021). |
 | `SetPolicyDrivenUpdateSourceForQualityUpdates` | DWORD | Same as above, for quality/cumulative updates. |
 | `SetPolicyDrivenUpdateSourceForDriverUpdates` | DWORD | Same as above, for driver updates. |
@@ -146,6 +154,8 @@ Where Intune/MDM delivers update policies via the Update CSP (`./Device/Vendor/M
 | `BranchReadinessLevel` | DWORD | Servicing channel (MDM-delivered). |
 | `ManagePreviewBuilds` | DWORD | Preview build management (MDM-delivered). |
 | `ExcludeWUDriversInQualityUpdate` | DWORD | Driver exclusion (MDM-delivered). |
+| `AllowAutoUpdate` | DWORD | Auto-update behavior via MDM. `5`=turn off automatic updates (blocker). Values 0-4 control notification/install behavior. |
+| `AllowUpdateService` | DWORD | `0`=block device from using Microsoft Update, WSUS, and Store (blocker). `1`=allowed (default). |
 
 ### MDM Enrollment
 
