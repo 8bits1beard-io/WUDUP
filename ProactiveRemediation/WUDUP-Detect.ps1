@@ -75,6 +75,52 @@ $RegPath_DO_Policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimiza
 $RegPath_DO_MDM    = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\DeliveryOptimization'
 
 # ============================================================================
+#  COLOR SUPPORT
+# ============================================================================
+# ANSI colors are only emitted when the host can render them AND the session is
+# interactive AND we're not running as SYSTEM. Intune Proactive Remediations run
+# as SYSTEM in a non-interactive session 0 — colors stay off there so the portal
+# shows clean plain text instead of escape-code garbage. PS 5.1 compatible.
+
+$script:UseColor = $false
+try {
+    $vtOk     = [bool]$Host.UI.SupportsVirtualTerminal
+    $interact = [Environment]::UserInteractive
+    $isSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
+    if ($vtOk -and $interact -and -not $isSystem) { $script:UseColor = $true }
+}
+catch { }
+
+$ESC = [char]27
+$script:ColorReset = if ($script:UseColor) { "$ESC[0m" }      else { '' }
+$script:ColorPass  = if ($script:UseColor) { "$ESC[32m" }     else { '' }  # green
+$script:ColorFail  = if ($script:UseColor) { "$ESC[31m" }     else { '' }  # red
+$script:ColorSkip  = if ($script:UseColor) { "$ESC[33m" }     else { '' }  # yellow
+$script:ColorBold  = if ($script:UseColor) { "$ESC[1m" }      else { '' }
+
+function Colorize-Status {
+    param([string]$Status)
+    $c = switch ($Status) {
+        'PASS' { $script:ColorPass }
+        'FAIL' { $script:ColorFail }
+        'SKIP' { $script:ColorSkip }
+        default { '' }
+    }
+    return "$c[$Status]$script:ColorReset"
+}
+
+function Colorize-Result {
+    param([string]$Result)
+    $c = switch ($Result) {
+        'COMPLIANT'     { $script:ColorPass }
+        'NON-COMPLIANT' { $script:ColorFail }
+        'ERROR'         { $script:ColorFail }
+        default { '' }
+    }
+    return "$script:ColorBold$c$Result$script:ColorReset"
+}
+
+# ============================================================================
 #  HELPERS
 # ============================================================================
 
@@ -116,7 +162,7 @@ function Format-Output {
     )
     $lines = @()
     $lines += "=== WUDUP Detection ==="
-    $lines += "$Result — $Reason"
+    $lines += "$(Colorize-Result $Result) — $Reason"
 
     if ($Checks -and $Checks.Count -gt 0) {
         $lines += ""
@@ -154,6 +200,36 @@ function Format-Output {
     }
 
     return ($lines -join "`n")
+}
+
+# Formats a registry value for display: $null -> <not set>, '' -> <empty>, else stringified.
+function Format-Val {
+    param($Value)
+    if ($null -eq $Value) { return '<not set>' }
+    if ($Value -is [string] -and $Value -eq '') { return '<empty>' }
+    return "$Value"
+}
+
+# Builds a numbered check entry. Returns an array of strings to append to $checks.
+# Status: PASS / FAIL / SKIP
+function Add-Check {
+    param(
+        [string]$Name,
+        $CurrentValue,
+        [string]$ExpectedValue,
+        [string]$Status,
+        [string]$Path = $null
+    )
+    $script:checkNum++
+    $num = '{0:D2}' -f $script:checkNum
+    $cur = Format-Val $CurrentValue
+    $statusTag = Colorize-Status $Status
+    $lines = @()
+    $lines += "  [$num] $statusTag $Name"
+    $lines += "         Current:  $cur"
+    $lines += "         Expected: $ExpectedValue"
+    if ($Path) { $lines += "         Path:     $Path" }
+    return $lines
 }
 
 # Reads a value from GP path first, then MDM path as fallback
@@ -307,96 +383,65 @@ try {
     Write-Log "Detection started"
     $indicators = @()
     $checks = @()
+    $script:checkNum = 0
 
     # --- 1. Update Blocker Checks ---
-    # NoAutoUpdate=1 disables all automatic updates
     $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
-    if ($noAutoUpdate -eq 1) {
-        $checks += "  [FAIL] NoAutoUpdate = 1 — automatic updates disabled"
-        $checks += "           $RegPath_AU\NoAutoUpdate"
-    }
-    else {
-        $checks += "  [PASS] NoAutoUpdate != 1                         ($RegPath_AU)"
-    }
+    $checks += Add-Check -Name 'NoAutoUpdate (1 = automatic updates disabled)' `
+        -CurrentValue $noAutoUpdate -ExpectedValue '<not set> or 0' `
+        -Status $(if ($noAutoUpdate -eq 1) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_AU\NoAutoUpdate"
 
-    # AUOptions=1 means "Never check for updates" — effectively disables WU
     $auOptions = Get-SafeRegistryValue -Path $RegPath_AU -Name 'AUOptions'
-    if ($auOptions -eq 1) {
-        $checks += "  [FAIL] AUOptions = 1 — set to never check for updates"
-        $checks += "           $RegPath_AU\AUOptions"
-    }
-    else {
-        $checks += "  [PASS] AUOptions != 1                            ($RegPath_AU)"
-    }
+    $checks += Add-Check -Name 'AUOptions (1 = Never check for updates)' `
+        -CurrentValue $auOptions -ExpectedValue '<not set> or != 1' `
+        -Status $(if ($auOptions -eq 1) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_AU\AUOptions"
 
-    # DoNotConnectToWindowsUpdateInternetLocations=1 blocks WU server connectivity
     $noConnect = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DoNotConnectToWindowsUpdateInternetLocations'
-    if ($noConnect -eq 1) {
-        $checks += "  [FAIL] DoNotConnectToWindowsUpdateInternetLocations = 1 — WU connectivity blocked"
-        $checks += "           $RegPath_WU\DoNotConnectToWindowsUpdateInternetLocations"
-    }
-    else {
-        $checks += "  [PASS] DoNotConnectToWindowsUpdateInternetLocations != 1  ($RegPath_WU)"
-    }
+    $checks += Add-Check -Name 'DoNotConnectToWindowsUpdateInternetLocations (1 = WU servers blocked)' `
+        -CurrentValue $noConnect -ExpectedValue '<not set> or 0' `
+        -Status $(if ($noConnect -eq 1) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_WU\DoNotConnectToWindowsUpdateInternetLocations"
 
-    # SetDisableUXWUAccess=1 hides WU UI and can block update flows
     $disableUX = Get-SafeRegistryValue -Path $RegPath_WU -Name 'SetDisableUXWUAccess'
-    if ($disableUX -eq 1) {
-        $checks += "  [FAIL] SetDisableUXWUAccess = 1 — Windows Update UI/access disabled"
-        $checks += "           $RegPath_WU\SetDisableUXWUAccess"
-    }
-    else {
-        $checks += "  [PASS] SetDisableUXWUAccess != 1                 ($RegPath_WU)"
-    }
+    $checks += Add-Check -Name 'SetDisableUXWUAccess (1 = WU UI/access disabled)' `
+        -CurrentValue $disableUX -ExpectedValue '<not set> or 0' `
+        -Status $(if ($disableUX -eq 1) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_WU\SetDisableUXWUAccess"
 
-    # DisableWindowsUpdateAccess=1 turns off access to all Windows Update features
     # Separate from SetDisableUXWUAccess — Microsoft Autopatch checks for this specifically
     $disableWUAccess = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DisableWindowsUpdateAccess'
-    if ($disableWUAccess -eq 1) {
-        $checks += "  [FAIL] DisableWindowsUpdateAccess = 1 — all Windows Update features disabled"
-        $checks += "           $RegPath_WU\DisableWindowsUpdateAccess"
-    }
-    else {
-        $checks += "  [PASS] DisableWindowsUpdateAccess != 1            ($RegPath_WU)"
-    }
+    $checks += Add-Check -Name 'DisableWindowsUpdateAccess (1 = all WU features turned off)' `
+        -CurrentValue $disableWUAccess -ExpectedValue '<not set> or 0' `
+        -Status $(if ($disableWUAccess -eq 1) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_WU\DisableWindowsUpdateAccess"
 
-    # MDM AllowAutoUpdate=5 disables automatic updates via Intune/MDM policy
     $mdmAllowAutoUpdate = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'AllowAutoUpdate'
-    if ($mdmAllowAutoUpdate -eq 5) {
-        $checks += "  [FAIL] MDM AllowAutoUpdate = 5 — automatic updates disabled via MDM policy"
-        $checks += "           $RegPath_MDM\AllowAutoUpdate"
-    }
-    else {
-        $checks += "  [PASS] MDM AllowAutoUpdate != 5                   ($RegPath_MDM)"
-    }
+    $checks += Add-Check -Name 'MDM AllowAutoUpdate (5 = auto updates disabled via Intune)' `
+        -CurrentValue $mdmAllowAutoUpdate -ExpectedValue '<not set> or != 5' `
+        -Status $(if ($mdmAllowAutoUpdate -eq 5) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_MDM\AllowAutoUpdate"
 
-    # MDM AllowUpdateService=0 blocks device from using WU/WSUS/Store entirely
     $mdmAllowUpdateService = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'AllowUpdateService'
-    if ($mdmAllowUpdateService -eq 0) {
-        $checks += "  [FAIL] MDM AllowUpdateService = 0 — all update services blocked via MDM policy"
-        $checks += "           $RegPath_MDM\AllowUpdateService"
-    }
-    else {
-        $checks += "  [PASS] MDM AllowUpdateService != 0                ($RegPath_MDM)"
-    }
+    $checks += Add-Check -Name 'MDM AllowUpdateService (0 = all update services blocked via Intune)' `
+        -CurrentValue $mdmAllowUpdateService -ExpectedValue '<not set> or != 0' `
+        -Status $(if ($mdmAllowUpdateService -eq 0) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_MDM\AllowUpdateService"
 
-    # Windows Update service (wuauserv) must not be disabled
     $wuSvc = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
-    if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') {
-        $checks += "  [FAIL] wuauserv service Disabled — Windows Update cannot run"
-    }
-    else {
-        $checks += "  [PASS] wuauserv service enabled"
-    }
+    $wuSvcStartVal = if ($null -ne $wuSvc) { "$($wuSvc.StartType)" } else { '<service not found>' }
+    $checks += Add-Check -Name 'wuauserv service startup type' `
+        -CurrentValue $wuSvcStartVal -ExpectedValue 'Manual or Automatic (not Disabled)' `
+        -Status $(if ($null -ne $wuSvc -and $wuSvc.StartType -eq 'Disabled') { 'FAIL' } else { 'PASS' }) `
+        -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\wuauserv\Start'
 
-    # Update Orchestrator Service (UsoSvc) must not be disabled
     $usoSvc = Get-Service -Name 'UsoSvc' -ErrorAction SilentlyContinue
-    if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') {
-        $checks += "  [FAIL] UsoSvc service Disabled — Update Orchestrator cannot run"
-    }
-    else {
-        $checks += "  [PASS] UsoSvc service enabled"
-    }
+    $usoSvcStartVal = if ($null -ne $usoSvc) { "$($usoSvc.StartType)" } else { '<service not found>' }
+    $checks += Add-Check -Name 'UsoSvc (Update Orchestrator) service startup type' `
+        -CurrentValue $usoSvcStartVal -ExpectedValue 'Manual or Automatic (not Disabled)' `
+        -Status $(if ($null -ne $usoSvc -and $usoSvc.StartType -eq 'Disabled') { 'FAIL' } else { 'PASS' }) `
+        -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\UsoSvc\Start'
 
     # Note: $orphanedUseWUServer is evaluated after WSUS section and added to $hasBlockers there
     $hasBlockers = (
@@ -415,10 +460,10 @@ try {
     $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
     $hasSCCM     = ($null -ne $sccmService -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM'))
 
-    # Check co-management: if the WU workload is shifted to Intune (CoManagementFlags bit 16),
+    # Check co-management: if the WU workload is shifted to Intune (CoManagementFlags bit 4 = 16),
     # SCCM no longer controls updates — evaluate as Intune-managed instead.
-    # Mirrors the co-management check in WUDUP-Remediate.ps1.
     $wuShiftedToIntune = $false
+    $coMgmtFlags = $null
     if ($hasSCCM) {
         $coMgmtFlags = Get-SafeRegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\CCM' -Name 'CoManagementFlags'
         $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
@@ -427,13 +472,17 @@ try {
         }
     }
 
-    if ($hasSCCM) {
-        $checks += "  [FAIL] SCCM controlling updates — WU workload not shifted to Intune"
-        $checks += "           HKLM:\SOFTWARE\Microsoft\CCM\CoManagementFlags"
+    $sccmCurrent = if ($null -eq $sccmService) {
+        'SCCM not present'
+    } elseif ($wuShiftedToIntune) {
+        "SCCM present, WU workload shifted to Intune (CoManagementFlags=$coMgmtFlags, bit 4 set)"
+    } else {
+        "SCCM controlling updates (CoManagementFlags=$(Format-Val $coMgmtFlags), bit 4 NOT set)"
     }
-    else {
-        $checks += "  [PASS] SCCM not controlling updates"
-    }
+    $checks += Add-Check -Name 'SCCM update management' `
+        -CurrentValue $sccmCurrent -ExpectedValue 'Not present, OR co-managed with WU workload shifted to Intune (CoManagementFlags bit 4 set)' `
+        -Status $(if ($hasSCCM) { 'FAIL' } else { 'PASS' }) `
+        -Path 'HKLM:\SOFTWARE\Microsoft\CCM\CoManagementFlags'
 
     # --- 3. Policy-Driven Update Source (most definitive, Windows 10 2004+) ---
     # Read GP and MDM separately — MDM-delivered PolicyDrivenSource=0 overrides GP on the WU client
@@ -452,26 +501,17 @@ try {
     $driverFromWU  = ($srcDriver_GP -eq 0 -or $srcDriver_MDM -eq 0)
     $otherFromWU   = ($srcOther_GP -eq 0 -or $srcOther_MDM -eq 0)
 
-    # Build per-type check lines with registry path detail on FAIL
+    # Build per-type check lines showing GP and MDM values side-by-side
     foreach ($type in @('Feature','Quality','Driver','Other')) {
         $gpVal  = Get-Variable -Name "src${type}_GP" -ValueOnly
         $mdmVal = Get-Variable -Name "src${type}_MDM" -ValueOnly
         $fromWU = Get-Variable -Name "$($type.ToLower())FromWU" -ValueOnly
 
-        if ($fromWU) {
-            $source = if ($mdmVal -eq 0) { $RegPath_MDM } else { $RegPath_WU }
-            $checks += "  [PASS] PolicyDrivenSource $type = 0 (WUfB)    ($source)"
-        }
-        elseif ($null -eq $gpVal -and $null -eq $mdmVal) {
-            $checks += "  [FAIL] PolicyDrivenSource $type = NOT SET"
-            $checks += "           GP:  $RegPath_WU"
-            $checks += "           MDM: $RegPath_MDM"
-        }
-        else {
-            $checks += "  [FAIL] PolicyDrivenSource $type = WSUS (value 1), needs WUfB (value 0)"
-            $checks += "           GP:  $RegPath_WU"
-            $checks += "           MDM: $RegPath_MDM"
-        }
+        $current = "GP=$(Format-Val $gpVal), MDM=$(Format-Val $mdmVal)"
+        $checks += Add-Check -Name "SetPolicyDrivenUpdateSourceFor${type}Updates" `
+            -CurrentValue $current -ExpectedValue '0 (Windows Update) on GP path OR MDM path' `
+            -Status $(if ($fromWU) { 'PASS' } else { 'FAIL' }) `
+            -Path "GP: $RegPath_WU  |  MDM: $RegPath_MDM"
     }
 
     # --- 4. WSUS Configuration ---
@@ -482,11 +522,12 @@ try {
 
     # Orphaned UseWUServer=1 without a valid WUServer — WU client points at nothing
     $orphanedUseWUServer = ($useWUServer -eq 1 -and ($null -eq $wuServer -or $wuServer -eq ''))
-    if ($orphanedUseWUServer) {
-        $checks += "  [FAIL] UseWUServer=1 but WUServer is empty — updates cannot reach any server"
-        $checks += "           $RegPath_AU\UseWUServer"
-        $hasBlockers = $true
-    }
+    $wsusCurrent = "UseWUServer=$(Format-Val $useWUServer), WUServer=$(Format-Val $wuServer)"
+    $checks += Add-Check -Name 'WSUS pointer integrity (UseWUServer + WUServer pair)' `
+        -CurrentValue $wsusCurrent -ExpectedValue 'Both unset, OR both set together (no orphan)' `
+        -Status $(if ($orphanedUseWUServer) { 'FAIL' } else { 'PASS' }) `
+        -Path "$RegPath_AU\UseWUServer"
+    if ($orphanedUseWUServer) { $hasBlockers = $true }
 
     # --- 5. Dual-Scan Suppression ---
     $disableDualScan = Get-SafeRegistryValue -Path $RegPath_WU -Name 'DisableDualScan'
@@ -501,42 +542,56 @@ try {
 
     # --- 6. Update Ring delivery ---
     if (-not $Config_RequireUpdateRing) {
-        $checks += "  [SKIP] Update Ring check disabled (`$Config_RequireUpdateRing = `$false)"
-    }
-    elseif ($hasUpdateRing) {
-        $checks += "  [PASS] Intune Update Ring delivering policy"
+        $checks += Add-Check -Name 'Intune Update Ring delivery' `
+            -CurrentValue 'check skipped' `
+            -ExpectedValue 'Set $Config_RequireUpdateRing = $true to enforce' `
+            -Status 'SKIP'
     }
     else {
-        $checks += "  [FAIL] No Intune Update Ring delivering policy"
-        $checks += "           HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\<GUID>\default\device\Update"
+        $checks += Add-Check -Name 'Intune Update Ring delivery' `
+            -CurrentValue $(if ($hasUpdateRing) { 'Active (WUfB values found under provider)' } else { 'Not detected' }) `
+            -ExpectedValue 'Active — WUfB values delivered via PolicyManager Providers path' `
+            -Status $(if ($hasUpdateRing) { 'PASS' } else { 'FAIL' }) `
+            -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\<GUID>\default\device\Update'
     }
 
     # --- 7. MDM enrollment ---
     if (-not $Config_RequireMDMEnrollment) {
-        $checks += "  [SKIP] MDM enrollment check disabled (`$Config_RequireMDMEnrollment = `$false)"
-    }
-    elseif ($mdmHealth.Enrolled) {
-        $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-management bridge' } else { 'Intune direct' }
-        $upnDisplay = if ($mdmHealth.UPN) { ", $($mdmHealth.UPN)" } else { '' }
-        $checks += "  [PASS] MDM enrollment active                     ($providerLabel$upnDisplay)"
+        $checks += Add-Check -Name 'MDM enrollment health' `
+            -CurrentValue 'check skipped' `
+            -ExpectedValue 'Set $Config_RequireMDMEnrollment = $true to enforce' `
+            -Status 'SKIP'
     }
     else {
-        $checks += "  [FAIL] No active MDM enrollment — device cannot receive WUfB policy"
-        $checks += "           HKLM:\SOFTWARE\Microsoft\Enrollments"
+        $mdmCurrent = if ($mdmHealth.Enrolled) {
+            $providerLabel = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'Co-management bridge' } else { 'Intune direct' }
+            $upnDisplay = if ($mdmHealth.UPN) { " ($($mdmHealth.UPN))" } else { '' }
+            "Enrolled via $providerLabel$upnDisplay"
+        } else {
+            'Not enrolled (no enrollment with EnrollmentState=1)'
+        }
+        $checks += Add-Check -Name 'MDM enrollment health' `
+            -CurrentValue $mdmCurrent `
+            -ExpectedValue 'Enrolled (EnrollmentState=1, ProviderID = MS DM Server or WMI_Bridge_SCCM_Server)' `
+            -Status $(if ($mdmHealth.Enrolled) { 'PASS' } else { 'FAIL' }) `
+            -Path 'HKLM:\SOFTWARE\Microsoft\Enrollments\<GUID>'
     }
 
     # --- 8. WU scan freshness ---
     if ($Config_MaxScanAgeDays -le 0) {
-        $checks += "  [SKIP] WU scan freshness check disabled (`$Config_MaxScanAgeDays = 0)"
-    }
-    elseif ($null -eq $scanStatus.AgeDays) {
-        $checks += "  [PASS] WU scan age unknown (no history available)"
-    }
-    elseif ($scanStatus.AgeDays -gt $Config_MaxScanAgeDays) {
-        $checks += "  [FAIL] WU scan stale — $($scanStatus.AgeDays) days ago (threshold: $Config_MaxScanAgeDays)"
+        $checks += Add-Check -Name 'WU scan freshness' `
+            -CurrentValue 'check skipped' `
+            -ExpectedValue 'Set $Config_MaxScanAgeDays > 0 to enforce' `
+            -Status 'SKIP'
     }
     else {
-        $checks += "  [PASS] WU scan current                           ($($scanStatus.AgeDays) days ago, threshold: $Config_MaxScanAgeDays)"
+        $scanCurrent = if ($null -eq $scanStatus.AgeDays) { 'Unknown (no scan history available)' }
+                       else { "$($scanStatus.AgeDays) days ago" }
+        $scanPass = ($null -eq $scanStatus.AgeDays) -or ($scanStatus.AgeDays -le $Config_MaxScanAgeDays)
+        $checks += Add-Check -Name 'WU scan freshness (last successful scan)' `
+            -CurrentValue $scanCurrent `
+            -ExpectedValue "<= $Config_MaxScanAgeDays days" `
+            -Status $(if ($scanPass) { 'PASS' } else { 'FAIL' })
     }
 
     # ========================================================================

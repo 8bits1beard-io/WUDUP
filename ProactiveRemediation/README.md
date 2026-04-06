@@ -7,167 +7,184 @@ Intune Proactive Remediation script pair for ensuring devices are managed by Win
 
 Both scripts run as SYSTEM, are non-interactive, and log to `%ProgramData%\WUDUP\Logs\`.
 
+The detection script answers a single question: *"Does this device have all the necessary settings so that Intune WUfB can manage ALL updates?"* It does **not** validate update policy values themselves (deferrals, deadlines, version pins) — those should come from your Intune Update Ring assignment and are surfaced as informational output only.
+
 ## Detection Flow
 
 ```mermaid
 flowchart TD
-    Start([Detection starts]) --> Blockers{Update blockers?}
+    Start([Detection starts]) --> Collect[Run all checks and<br/>collect issues]
 
-    Blockers -- Yes --> NC_Blocked[/"NON-COMPLIANT\nBlockers detected"/]
-    Blockers -- No --> Collect[Collect WUfB indicators]
+    Collect --> Blockers[1. Update blockers]
+    Blockers --> SCCM[2. SCCM controlling updates]
+    SCCM --> PDS[3. PolicyDrivenSource<br/>all 4 types = 0]
+    PDS --> Ring[4. Update Ring delivered<br/>opt-in]
+    Ring --> MDM[5. MDM enrollment active<br/>opt-in]
+    MDM --> Scan[6. WU scan freshness<br/>opt-in]
 
-    Collect --> HasWSUS{WSUS configured?}
+    Scan --> Decide{Any issues<br/>collected?}
+    Decide -- Yes --> NC[/"NON-COMPLIANT<br/>all issues listed"/]
+    Decide -- No --> C([COMPLIANT])
 
-    HasWSUS -- No --> HasSCCM{SCCM detected?}
-    HasWSUS -- Yes --> WSUSIndicators{WUfB indicators\npresent?}
-
-    WSUSIndicators -- No --> NC_WSUS[/"NON-COMPLIANT\nWSUS managed"/]
-    WSUSIndicators -- Yes --> PolicyDriven{PolicyDrivenSource\ndirects to WU?}
-
-    PolicyDriven -- Yes --> HealthChecks[Management channel\nhealth checks]
-    PolicyDriven -- No --> NC_Dual[/"NON-COMPLIANT\ndual-scan risk"/]
-
-    HasSCCM -- No --> HasIndicators{WUfB indicators\npresent?}
-    HasSCCM -- Yes --> CoMgmt{WU workload\nshifted to Intune?}
-
-    CoMgmt -- No --> NC_SCCM[/"NON-COMPLIANT\nSCCM managed"/]
-    CoMgmt -- Yes --> HasIndicators
-
-    HasIndicators -- Yes --> HealthChecks
-    HasIndicators -- No --> NC_None[/"NON-COMPLIANT\nno WUfB policy"/]
-
-    HealthChecks --> UpdateRing{Update Ring\nrequired + missing?}
-    UpdateRing -- Yes --> NC_Ring[/"NON-COMPLIANT\nno Update Ring"/]
-    UpdateRing -- No --> MDMCheck{MDM enrollment\nrequired + missing?}
-    MDMCheck -- Yes --> NC_MDM[/"NON-COMPLIANT\nno MDM enrollment"/]
-    MDMCheck -- No --> ScanCheck{Scan stale\nbeyond threshold?}
-    ScanCheck -- Yes --> NC_Scan[/"NON-COMPLIANT\nscan stale"/]
-    ScanCheck -- No --> C_WUfB([COMPLIANT\nWUfB managed])
-
-    style C_WUfB fill:#2d6a2d,color:#fff
-    style NC_Blocked fill:#8b1a1a,color:#fff
-    style NC_WSUS fill:#8b1a1a,color:#fff
-    style NC_Dual fill:#8b1a1a,color:#fff
-    style NC_SCCM fill:#8b1a1a,color:#fff
-    style NC_None fill:#8b1a1a,color:#fff
-    style NC_Ring fill:#8b1a1a,color:#fff
-    style NC_MDM fill:#8b1a1a,color:#fff
-    style NC_Scan fill:#8b1a1a,color:#fff
+    style C fill:#2d6a2d,color:#fff
+    style NC fill:#8b1a1a,color:#fff
 ```
+
+The script does **not** short-circuit on the first failure. Every check runs, every issue is collected into a single list, and one structured report is emitted at the end. This means a non-compliant device's report shows the complete picture (all blockers, all missing PolicyDrivenSource keys, health failures) in a single Intune run.
 
 ## Detection Details
 
-### 1. Blocker Checks (checked first, immediate non-compliant)
+### 1. Update blockers
+
+Each blocker is checked individually and emits a `[PASS]`/`[FAIL]` line in the output (with the registry path on fail).
 
 | Check | Condition | Why it fails |
 |-------|-----------|-------------|
 | Auto-updates disabled | `NoAutoUpdate = 1` in AU subkey | Updates are disabled entirely |
 | Never check | `AUOptions = 1` in AU subkey | WU client will never check for updates |
-| Internet WU blocked | `DoNotConnectToWindowsUpdateInternetLocations = 1` | Device cannot reach Windows Update servers |
-| WU UI disabled | `SetDisableUXWUAccess = 1` | WU access hidden/blocked |
-| WU service disabled | `wuauserv` StartType = Disabled | Windows Update service won't run |
-| USO service disabled | `UsoSvc` StartType = Disabled | Update Orchestrator won't run |
+| Internet WU blocked | `DoNotConnectToWindowsUpdateInternetLocations = 1` in WU key | Device cannot reach Windows Update servers |
+| WU UI/access disabled | `SetDisableUXWUAccess = 1` in WU key | WU access hidden/blocked |
+| All WU features disabled | `DisableWindowsUpdateAccess = 1` in WU key | All Windows Update features turned off (Microsoft Autopatch checks this specifically) |
+| MDM auto-update disabled | `AllowAutoUpdate = 5` in MDM Update key | Auto updates disabled via Intune/MDM policy — **cannot be auto-remediated** |
+| MDM update service blocked | `AllowUpdateService = 0` in MDM Update key | All update services blocked via Intune/MDM policy — **cannot be auto-remediated** |
+| WU service disabled | `wuauserv` StartType = `Disabled` | Windows Update service won't run |
+| USO service disabled | `UsoSvc` StartType = `Disabled` | Update Orchestrator won't run |
+| Orphaned WSUS pointer | `UseWUServer = 1` (AU) but `WUServer` empty/null | WU client points at no server |
 
-Any single blocker causes immediate non-compliant (exit 1).
+### 2. SCCM check
 
-### 2. WUfB Indicator Collection
+| Check | Detected when | Resolution |
+|-------|--------------|------------|
+| SCCM controlling updates | `ccmexec` service exists AND `HKLM:\SOFTWARE\Microsoft\CCM` exists | If `CoManagementFlags` value 16 (bit position 4) is set, the WU workload has shifted to Intune and SCCM is cleared. Otherwise, SCCM is reported as a blocker for WUfB. |
 
-The script collects indicators that the device is managed by WUfB. Any indicator present means WUfB may be active.
+### 3. PolicyDrivenSource (the core compliance gate)
 
-| Indicator | Registry values checked | Path priority |
-|-----------|----------------------|---------------|
-| Policy-driven update source | `SetPolicyDrivenUpdateSourceForFeatureUpdates` (value 0 = WU) | GP then MDM |
-| | `SetPolicyDrivenUpdateSourceForQualityUpdates` (value 0 = WU) | GP then MDM |
-| | `SetPolicyDrivenUpdateSourceForDriverUpdates` (value 0 = WU) | GP then MDM |
-| | `SetPolicyDrivenUpdateSourceForOtherUpdates` (value 0 = WU) | GP then MDM |
-| Feature deferral | `DeferFeatureUpdatesPeriodInDays` | GP then MDM |
-| Quality deferral | `DeferQualityUpdatesPeriodInDays` | GP then MDM |
-| Version targeting | `TargetReleaseVersion = 1` + `TargetReleaseVersionInfo` + `ProductVersion` | GP then MDM |
-| Feature deadline | `ConfigureDeadlineForFeatureUpdates` at GP then MDM; fallback to `ComplianceDeadlineForFU` at GP | GP then MDM |
-| Quality deadline | `ConfigureDeadlineForQualityUpdates` at GP then MDM; fallback to `ComplianceDeadline` at GP | GP then MDM |
-| Grace period | `ConfigureDeadlineGracePeriod` at GP then MDM; fallback to `ComplianceGracePeriod` at GP | GP then MDM |
-| Grace period (feature) | `ConfigureDeadlineGracePeriodForFeatureUpdates` at GP then MDM; fallback to `ComplianceGracePeriodForFU` at GP | GP then MDM |
-| Channel targeting | `BranchReadinessLevel` | GP then MDM |
-| Preview build management | `ManagePreviewBuilds` | GP then MDM |
-| Driver exclusion | `ExcludeWUDriversInQualityUpdate` | GP then MDM |
+All four `SetPolicyDrivenUpdateSourceFor{Feature,Quality,Driver,Other}Updates` values must equal `0` (= Windows Update). This is checked at GP and MDM paths separately — either path having `0` is sufficient (MDM-delivered values override GP on the WU client).
 
-### 3. Management Authority Detection
+| Update type | GP path value | MDM path value |
+|-------------|---------------|----------------|
+| Feature | `SetPolicyDrivenUpdateSourceForFeatureUpdates` | same name |
+| Quality | `SetPolicyDrivenUpdateSourceForQualityUpdates` | same name |
+| Driver  | `SetPolicyDrivenUpdateSourceForDriverUpdates`  | same name |
+| Other   | `SetPolicyDrivenUpdateSourceForOtherUpdates`   | same name |
 
-| Authority | How detected |
-|-----------|-------------|
-| WSUS | `UseWUServer = 1` (AU subkey) AND `WUServer` exists (WU key) |
-| SCCM | `ccmexec` service running AND `HKLM:\SOFTWARE\Microsoft\CCM` exists. Co-management check: if `CoManagementFlags` value 16 (bit position 4) is set, the WU workload is considered shifted to Intune and SCCM is cleared — device evaluated for WUfB indicators instead. |
+A missing value is treated the same as a wrong value: non-compliant. All four must pass.
 
-### 4. Management Channel Health Checks (opt-in)
+WSUS configuration (`WUServer`/`UseWUServer`) is **not** itself a compliance gate. If WSUS is configured but all four PolicyDrivenSource keys = 0, the device is compliant (the WSUS pointer is stale and surfaced as a note, not an issue). If WSUS is configured AND any PolicyDrivenSource key is wrong, the WSUS server name is appended to the issue list as context.
 
-These checks run after a device passes WUfB configuration checks. They validate whether the management channel is healthy — not just configured, but actually working.
+### 4. Management channel health checks (opt-in)
+
+These run for every device — they are collected as part of the same issue list as the gates above and are not gated behind the configuration checks. Each can be disabled independently via the configuration flags at the top of the script.
 
 | Check | Config flag | What it validates |
 |-------|-------------|-------------------|
-| Update Ring delivery | `$Config_RequireUpdateRing` | Intune/co-mgmt has delivered WUfB policy values (deferrals, deadlines, etc.) via PolicyManager Providers path |
-| MDM enrollment health | `$Config_RequireMDMEnrollment` | Active MDM enrollment exists (`EnrollmentState=1` with valid ProviderID) |
-| WU scan freshness | `$Config_MaxScanAgeDays` | WU client has scanned within N days |
+| Update Ring delivery | `$Config_RequireUpdateRing` | At least one MDM enrollment with provider `MS DM Server` or `WMI_Bridge_SCCM_Server` has WUfB-specific values present in `PolicyManager\Providers\<GUID>\default\device\Update`. This distinguishes a real Intune Update Ring from PolicyDrivenSource keys that the remediation script just wrote. |
+| MDM enrollment health | `$Config_RequireMDMEnrollment` | An enrollment exists with `EnrollmentState = 1` and a recognized ProviderID. |
+| WU scan freshness | `$Config_MaxScanAgeDays` | The WU client has scanned within N days. Source priority: `Microsoft.Update.AutoUpdate` COM (`LastSearchSuccessDate`) → `Microsoft.Update.Session` history → legacy `Auto Update\Results\Detect\LastSuccessTime` registry. |
 
-MDM provider IDs recognized: `MS DM Server` (direct Intune) and `WMI_Bridge_SCCM_Server` (SCCM co-management bridge).
+**Remediation cannot fix any of these conditions.** Failures point to manual action (re-enroll the device, investigate the WU client, or assign an Update Ring in Intune).
 
-**Important**: Remediation cannot fix these conditions. If these checks fail, the output message indicates manual intervention is needed (re-enrollment, investigation, or Update Ring assignment in Intune).
+Recognized MDM provider IDs:
+- `MS DM Server` — direct Intune enrollment
+- `WMI_Bridge_SCCM_Server` — SCCM co-management bridge
 
-### 5. Compliance Decision
+### 5. Compliance decision
 
-| Scenario | Result | Exit |
-|----------|--------|------|
-| Any blocker detected | **Non-compliant** (blockers listed) | 1 |
-| WUfB indicators present, no WSUS | **Compliant** | 0 |
-| WUfB indicators present + WSUS, but PolicyDrivenSource directs updates to WU | **Compliant** (split-source) | 0 |
-| WSUS + WUfB indicators, but no PolicyDrivenSource override | **Non-compliant** (dual-scan risk) | 1 |
-| WSUS configured, no WUfB indicators | **Non-compliant** (WSUS managed) | 1 |
-| SCCM detected, WU workload not shifted to Intune | **Non-compliant** (SCCM managed) | 1 |
-| SCCM co-managed, WU workload shifted to Intune, but no WUfB indicators | **Non-compliant** (no WUfB policy) | 1 |
-| No indicators, no WSUS, no SCCM | **Non-compliant** (no policy, default WU) | 1 |
-| `$Config_RequireUpdateRing = $true` + no Update Ring detected | **Non-compliant** (no Update Ring) | 1 |
-| `$Config_RequireMDMEnrollment = $true` + no active enrollment | **Non-compliant** (no MDM enrollment) | 1 |
-| `$Config_MaxScanAgeDays > 0` + scan older than threshold | **Non-compliant** (scan stale) | 1 |
+The script collects every issue from sections 1–4 into a single list, then:
 
-Compliant output always includes status tags: `[Update Ring: Active/Not detected]`, `[MDM: Enrolled via Intune/Co-mgmt bridge (UPN)/Not enrolled]`, `[LastScan: Nd ago/Unknown]`.
+| Outcome | Condition | Exit |
+|---------|-----------|------|
+| **COMPLIANT** | Issue list is empty | 0 |
+| **NON-COMPLIANT** | Issue list has any entries | 1 |
+| **ERROR** | Unhandled exception during detection | 1 |
 
-### Registry Paths
+A compliant exit may still include a note line if a stale WSUS server is configured but fully overridden by PolicyDrivenSource keys.
+
+## Output Format
+
+Every run produces a structured multi-section report (built by `Format-Output`) which Intune captures and displays in the device's remediation history. The exit code is what Intune actually uses for compliance — the text is for admins reading the report.
+
+Sections (in order):
+
+1. **Header** — `=== WUDUP Detection ===` and a one-line `RESULT — reason`
+2. **Checks Performed** — every blocker/SCCM/PolicyDrivenSource/health check as a `[PASS]`/`[FAIL]`/`[SKIP]` line, with the registry path shown beneath any `[FAIL]`
+3. **Issues Found** *(non-compliant only)* — human-readable list of what's wrong
+4. **Remediation** *(non-compliant only)* — what to do, including notes when MDM-delivered blockers can't be auto-fixed
+5. **Management Channel** — health summary block:
+   - `Update Ring: Active | Not detected`
+   - `MDM: Enrolled via {Intune direct | Co-management bridge} ({UPN}) | Not enrolled`
+   - `Last WU scan: N days ago | Unknown`
+   - `Last install: yyyy-MM-dd HH:mm` (when known)
+   - `Pending reboot: Yes | No`
+   - `DO Mode: 100 (Bypass)` warning (only if mode 100 is set — deprecated on Windows 11)
+   - `cryptsvc: Disabled` and `TrustedInstaller: Disabled` warnings (only if disabled)
+6. **WUfB Policy** — informational dump of policy values delivered to the device (see next section). Header changes to `WUfB Policy (delivered but not effective — issues must be resolved first)` when the result is non-compliant.
+
+### Informational policy indicators (not gates)
+
+These values are read and displayed for context but **never affect compliance**. Values come from `Get-PolicyValue` (GP path first, MDM fallback) unless noted.
+
+| Indicator | Source / notes |
+|-----------|---------------|
+| Feature deferral | `DeferFeatureUpdatesPeriodInDays`. Warns if `DeferFeatureUpdates` enable flag = 0 alongside a non-zero period. |
+| Quality deferral | `DeferQualityUpdatesPeriodInDays`. Warns if `DeferQualityUpdates` enable flag = 0 alongside a non-zero period. |
+| Version target | Handles **both** formats: GP uses `TargetReleaseVersion = 1` (DWORD enable flag) + `TargetReleaseVersionInfo` (string); MDM uses `TargetReleaseVersion` as the version string itself. `ProductVersion` is prepended when present. |
+| Feature deadline | `ConfigureDeadlineForFeatureUpdates` at GP, then `ComplianceDeadlineForFU` at GP, then `ConfigureDeadlineForFeatureUpdates` at MDM |
+| Quality deadline | `ConfigureDeadlineForQualityUpdates` at GP, then `ComplianceDeadline` at GP, then `ConfigureDeadlineForQualityUpdates` at MDM |
+| Grace period | `ConfigureDeadlineGracePeriod` at GP, then `ComplianceGracePeriod` at GP, then `ConfigureDeadlineGracePeriod` at MDM |
+| Grace period (feature) | `ConfigureDeadlineGracePeriodForFeatureUpdates` at GP, then `ComplianceGracePeriodForFU` at GP, then `ConfigureDeadlineGracePeriodForFeatureUpdates` at MDM |
+| Update channel | `BranchReadinessLevel` (2 = GA, 4 = Preview, 8 = Insider Slow, 16 = Semi-Annual Channel) |
+| Preview builds | `ManagePreviewBuilds` (2 = Enabled, otherwise Disabled) |
+| Driver updates | `ExcludeWUDriversInQualityUpdate` |
+
+## Registry paths read
 
 | Path | Purpose |
 |------|---------|
 | `HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate` | Group Policy WU settings |
 | `HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU` | Group Policy Automatic Updates settings |
 | `HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update` | MDM/Intune policy settings |
-| `HKLM:\SOFTWARE\Microsoft\Enrollments\{GUID}` | MDM enrollment state |
-| `HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\{GUID}\default\device\Update` | Per-provider MDM policy delivery |
-| `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Detect` | Last WU scan timestamp |
+| `HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\{GUID}\default\device\Update` | Per-provider MDM policy delivery (Update Ring detection) |
+| `HKLM:\SOFTWARE\Microsoft\Enrollments\{GUID}` | MDM enrollment state and ProviderID |
+| `HKLM:\SOFTWARE\Microsoft\CCM` (incl. `CoManagementFlags`) | SCCM presence and co-management workload bitmask |
+| `HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization` | DO mode (GP, value `DownloadMode`) |
+| `HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\DeliveryOptimization` | DO mode (MDM, value `DODownloadMode`) |
+| `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Detect` | Legacy WU scan timestamp fallback |
+| `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired` | Pending reboot indicator |
+| `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending` | Pending reboot indicator |
+
+COM objects used: `Microsoft.Update.AutoUpdate` (scan/install timestamps), `Microsoft.Update.Session` (history fallback), `Microsoft.Update.SystemInfo` (authoritative pending-reboot).
 
 ## Remediation Actions
 
-The remediation script **only removes blockers** — it does not set update policies (deferrals, deadlines, version pins, etc.). Those should come from your Intune WUfB Update Ring assignment.
+The remediation script **only removes blockers and resets WU client state** — it does not set update policies (deferrals, deadlines, version pins). Those should come from your Intune WUfB Update Ring assignment.
 
 | Step | Action | Details |
 |------|--------|---------|
-| 0 | SCCM guard | Skips if SCCM manages WU workload and co-management hasn't shifted it to Intune (`CoManagementFlags` value 16, bit position 4) |
-| 1 | Stop WU services | Stops `wuauserv`, `bits`, `UsoSvc` to prevent cached in-memory state from overriding registry changes |
-| 2 | Remove WSUS config | `WUServer`, `WUStatusServer`, `DoNotConnectToWindowsUpdateInternetLocations`, `SetDisableUXWUAccess`, `UpdateServiceUrlAlternate`, `UseWUServer` |
-| 3 | Set PolicyDrivenSource | All 4 update types set to 0 (Windows Update) + `UseUpdateClassPolicySource = 1` |
-| 4 | Remove update-disabling values | `NoAutoUpdate = 1` and `AUOptions = 1` removed if set |
-| 5 | Clean stale pauses | `PauseFeatureUpdates`, `PauseQualityUpdates` + their start/end timestamps |
-| 6 | Clear UpdatePolicy cache | Removes `HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy` — the WU client's internal resolved policy state. Stale entries here cause the client to ignore policy changes. |
-| 7 | Clear SoftwareDistribution | Removes `%SystemRoot%\SoftwareDistribution` — forces fresh scan state and database rebuild |
-| 8 | Re-enable WU services | `wuauserv` and `UsoSvc` set to `Manual` startup if `Disabled` |
-| 9 | Start services + re-sync | Starts WU services, triggers Intune `PushLaunch` task for policy re-delivery, then `usoclient StartScan` |
+| 0   | SCCM guard | If `ccmexec` + `HKLM:\SOFTWARE\Microsoft\CCM` exist and `CoManagementFlags` bit 4 (value 16) is **not** set, exits SKIPPED with exit code 1 — unless `$Config_AllowOnSCCM = $true`, in which case it continues with a warning entry in the change list. Co-managed devices (bit 4 set) continue normally. |
+| 0b  | MDM blocker warnings | If MDM `AllowAutoUpdate = 5` or `AllowUpdateService = 0` is set, appends a warning to the change list — these cannot be fixed locally; the Intune device configuration profile must be reviewed. |
+| 1   | Stop WU services | Stops `wuauserv`, `bits`, `UsoSvc` to prevent cached in-memory state from overriding registry changes |
+| 2   | Remove WSUS config | Deletes `WUServer`, `WUStatusServer`, `DoNotConnectToWindowsUpdateInternetLocations`, `SetDisableUXWUAccess`, `DisableWindowsUpdateAccess`, `UpdateServiceUrlAlternate`, `UseWUServer` |
+| 3   | Set PolicyDrivenSource | All 4 update types set to `0` (Windows Update) + `UseUpdateClassPolicySource = 1` in AU subkey (required for direct registry writes; GPO/CSP set this automatically) |
+| 4   | Remove update-disabling values | Deletes `NoAutoUpdate = 1` and `AUOptions = 1` if set |
+| 5   | Clean stale pauses | Removes `PauseFeatureUpdates`, `PauseQualityUpdates` enable flags + their `*StartTime` / `*EndTime` timestamps |
+| 6   | Clear UpdatePolicy cache | Deletes `HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy` — the WU client's resolved-policy cache. Stale entries here cause the client to ignore new policy. Intune re-sync rebuilds it. Critical for fixing "Offer Ready" stalls. |
+| 7   | Clear SoftwareDistribution | Deletes `%SystemRoot%\SoftwareDistribution` to force a fresh scan database. Services must be stopped first (step 1) or files lock. |
+| 8   | Re-enable WU services | Sets `wuauserv` and `UsoSvc` to `Manual` startup if currently `Disabled` |
+| 9   | Start services + re-sync | Starts `wuauserv`, `bits`, `UsoSvc`; triggers the Intune `PushLaunch` scheduled task to force policy re-delivery; runs `usoclient StartScan` |
+
+Output is a structured `=== WUDUP Remediation ===` block with `REMEDIATED` / `SKIPPED` / `ERROR`, a reason line, and the change list.
 
 ## Configuration
 
 ```powershell
-# --- WUDUP-Remediate.ps1 ---
-$Config_AllowOnSCCM = $false   # $true to force remediation on SCCM-managed devices
-
 # --- WUDUP-Detect.ps1 ---
-$Config_RequireUpdateRing = $true      # $false to skip Update Ring delivery check
-$Config_RequireMDMEnrollment = $true  # $false to skip MDM enrollment check
-$Config_MaxScanAgeDays = 7            # Max days since last WU scan (0 = disabled)
+$Config_RequireUpdateRing    = $true   # Require Intune Update Ring delivering WUfB policy
+$Config_RequireMDMEnrollment = $true   # Require active MDM enrollment (EnrollmentState=1)
+$Config_MaxScanAgeDays       = 7       # Max days since last WU scan (0 = disabled)
+
+# --- WUDUP-Remediate.ps1 ---
+$Config_AllowOnSCCM          = $false  # $true to force remediation on SCCM-managed devices
 ```
 
 ## Deployment in Intune

@@ -48,6 +48,41 @@ $RegPath_WU = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
 $RegPath_AU = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
 
 # ============================================================================
+#  COLOR SUPPORT
+# ============================================================================
+# ANSI colors are only emitted when the host can render them AND the session is
+# interactive AND we're not running as SYSTEM. Intune Proactive Remediations run
+# as SYSTEM in a non-interactive session 0 — colors stay off there so the portal
+# shows clean plain text instead of escape-code garbage. PS 5.1 compatible.
+
+$script:UseColor = $false
+try {
+    $vtOk     = [bool]$Host.UI.SupportsVirtualTerminal
+    $interact = [Environment]::UserInteractive
+    $isSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
+    if ($vtOk -and $interact -and -not $isSystem) { $script:UseColor = $true }
+}
+catch { }
+
+$ESC = [char]27
+$script:ColorReset = if ($script:UseColor) { "$ESC[0m" }  else { '' }
+$script:ColorPass  = if ($script:UseColor) { "$ESC[32m" } else { '' }  # green
+$script:ColorFail  = if ($script:UseColor) { "$ESC[31m" } else { '' }  # red
+$script:ColorSkip  = if ($script:UseColor) { "$ESC[33m" } else { '' }  # yellow
+$script:ColorBold  = if ($script:UseColor) { "$ESC[1m" }  else { '' }
+
+function Colorize-Result {
+    param([string]$Result)
+    $c = switch ($Result) {
+        'REMEDIATED' { $script:ColorPass }
+        'SKIPPED'    { $script:ColorSkip }
+        'ERROR'      { $script:ColorFail }
+        default { '' }
+    }
+    return "$script:ColorBold$c$Result$script:ColorReset"
+}
+
+# ============================================================================
 #  HELPERS
 # ============================================================================
 
@@ -103,15 +138,52 @@ function Format-Output {
     )
     $lines = @()
     $lines += "=== WUDUP Remediation ==="
-    $lines += "$Result"
+    $lines += "$(Colorize-Result $Result)"
     $lines += ""
     $lines += "Reason: $Reason"
     if ($Changes -and $Changes.Count -gt 0) {
         $lines += ""
         $lines += "Actions:"
-        foreach ($c in $Changes) { $lines += "  - $c" }
+        foreach ($c in $Changes) { $lines += $c }
     }
     return ($lines -join "`n")
+}
+
+# Formats a value for before/after display: $null -> <not set>, '' -> <empty>, else stringified.
+function Format-Val {
+    param($Value)
+    if ($null -eq $Value) { return '<not set>' }
+    if ($Value -is [string] -and $Value -eq '') { return '<empty>' }
+    return "$Value"
+}
+
+# Builds a numbered remediation action entry showing before/after values.
+function Add-Action {
+    param(
+        [string]$Description,
+        $Before,
+        $After,
+        [string]$Path = $null,
+        [switch]$AfterDeleted
+    )
+    $script:actionNum++
+    $num = '{0:D2}' -f $script:actionNum
+    $beforeStr = Format-Val $Before
+    $afterStr  = if ($AfterDeleted) { '<deleted>' } else { Format-Val $After }
+    $lines = @()
+    $lines += "  [$num] $Description"
+    $lines += "       Before: $beforeStr"
+    $lines += "       After:  $afterStr"
+    if ($Path) { $lines += "       Path:   $Path" }
+    return $lines
+}
+
+# Builds a numbered note line (no before/after — for warnings or status messages).
+function Add-Note {
+    param([string]$Message)
+    $script:actionNum++
+    $num = '{0:D2}' -f $script:actionNum
+    return @("  [$num] $Message")
 }
 
 # ============================================================================
@@ -121,6 +193,7 @@ function Format-Output {
 try {
     Write-Log "Remediation started"
     $changes = @()
+    $script:actionNum = 0
 
     # --- Step 0: SCCM guard ---
     $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
@@ -132,19 +205,21 @@ try {
         $wuShiftedToIntune = ($null -ne $coMgmtFlags -and ($coMgmtFlags -band 16) -eq 16)
 
         if (-not $wuShiftedToIntune -and -not $Config_AllowOnSCCM) {
+            $skipNotes  = Add-Note "SCCM detected (CoManagementFlags=$(Format-Val $coMgmtFlags), bit 4 NOT set)"
+            $skipNotes += Add-Note 'Set $Config_AllowOnSCCM = $true to override and force remediation'
             $msg = Format-Output -Result 'SKIPPED' `
                 -Reason "SCCM/ConfigMgr manages WU workload — local changes will be overwritten" `
-                -Changes @("Set Config_AllowOnSCCM=`$true to override")
+                -Changes $skipNotes
             Write-Log "SKIPPED: SCCM controls WU workload"
             Write-Output $msg
             exit 1
         }
 
         if ($wuShiftedToIntune) {
-            $changes += 'SCCM co-managed (WU->Intune)'
+            $changes += Add-Note "SCCM co-managed — WU workload shifted to Intune (CoManagementFlags=$coMgmtFlags)"
         }
         else {
-            $changes += 'WARNING: SCCM active, forced via Config_AllowOnSCCM'
+            $changes += Add-Note 'WARNING: SCCM active, forced to continue via $Config_AllowOnSCCM = $true'
         }
     }
 
@@ -152,23 +227,32 @@ try {
     $mdmPath = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update'
     $mdmAllowAutoUpdate = Get-SafeRegistryValue -Path $mdmPath -Name 'AllowAutoUpdate'
     if ($mdmAllowAutoUpdate -eq 5) {
-        $changes += 'WARNING: MDM AllowAutoUpdate=5 — auto updates disabled via Intune, review device config profiles'
+        $changes += Add-Note 'WARNING: MDM AllowAutoUpdate=5 detected (auto updates disabled via Intune) — review device config profiles, cannot be fixed locally'
     }
     $mdmAllowUpdateService = Get-SafeRegistryValue -Path $mdmPath -Name 'AllowUpdateService'
     if ($mdmAllowUpdateService -eq 0) {
-        $changes += 'WARNING: MDM AllowUpdateService=0 — all update services blocked via Intune, review device config profiles'
+        $changes += Add-Note 'WARNING: MDM AllowUpdateService=0 detected (all update services blocked via Intune) — review device config profiles, cannot be fixed locally'
     }
 
     # --- Step 1: Stop WU-related services before making changes ---
     # Prevents cached in-memory state from overriding registry changes
     $stopServices = @('wuauserv', 'bits', 'UsoSvc')
+    $svcStatusBefore = @{}
     foreach ($svcName in $stopServices) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        $svcStatusBefore[$svcName] = if ($null -ne $svc) { "$($svc.Status)" } else { '<not found>' }
         if ($null -ne $svc -and $svc.Status -eq 'Running') {
             Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
         }
     }
-    $changes += 'Stopped WU services'
+    $svcStatusAfter = @{}
+    foreach ($svcName in $stopServices) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        $svcStatusAfter[$svcName] = if ($null -ne $svc) { "$($svc.Status)" } else { '<not found>' }
+    }
+    $beforeStr = ($stopServices | ForEach-Object { "$_=$($svcStatusBefore[$_])" }) -join ', '
+    $afterStr  = ($stopServices | ForEach-Object { "$_=$($svcStatusAfter[$_])" }) -join ', '
+    $changes += Add-Action -Description 'Stop WU-related services' -Before $beforeStr -After $afterStr
 
     # --- Step 2: Remove WSUS configuration ---
     $wsusValues = @(
@@ -185,7 +269,8 @@ try {
         $current = Get-SafeRegistryValue -Path $item.Path -Name $item.Name
         if ($null -ne $current) {
             Remove-RegValue -Path $item.Path -Name $item.Name
-            $changes += "Removed $($item.Name)"
+            $changes += Add-Action -Description "Remove WSUS value: $($item.Name)" `
+                -Before $current -AfterDeleted -Path "$($item.Path)\$($item.Name)"
         }
     }
 
@@ -198,23 +283,30 @@ try {
     )
 
     foreach ($key in $sourceKeys) {
+        $before = Get-SafeRegistryValue -Path $RegPath_WU -Name $key
         Set-RegDWord -Path $RegPath_WU -Name $key -Value 0
+        $changes += Add-Action -Description "Set $key = 0 (Windows Update)" `
+            -Before $before -After 0 -Path "$RegPath_WU\$key"
     }
     # Required for PolicyDrivenSource to take effect when set via direct registry write (not GPO/CSP)
+    $useClassBefore = Get-SafeRegistryValue -Path $RegPath_AU -Name 'UseUpdateClassPolicySource'
     Set-RegDWord -Path $RegPath_AU -Name 'UseUpdateClassPolicySource' -Value 1
-    $changes += 'Set PolicyDrivenUpdateSource (all types -> WU)'
+    $changes += Add-Action -Description 'Set UseUpdateClassPolicySource = 1 (enables direct PolicyDrivenSource writes)' `
+        -Before $useClassBefore -After 1 -Path "$RegPath_AU\UseUpdateClassPolicySource"
 
     # --- Step 4: Remove update-disabling registry values ---
     $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
     if ($noAutoUpdate -eq 1) {
         Remove-RegValue -Path $RegPath_AU -Name 'NoAutoUpdate'
-        $changes += 'Removed NoAutoUpdate=1'
+        $changes += Add-Action -Description 'Remove NoAutoUpdate (re-enables automatic updates)' `
+            -Before $noAutoUpdate -AfterDeleted -Path "$RegPath_AU\NoAutoUpdate"
     }
 
     $auOptions = Get-SafeRegistryValue -Path $RegPath_AU -Name 'AUOptions'
     if ($auOptions -eq 1) {
         Remove-RegValue -Path $RegPath_AU -Name 'AUOptions'
-        $changes += 'Removed AUOptions=1 (Never check)'
+        $changes += Add-Action -Description 'Remove AUOptions (clears Never check setting)' `
+            -Before $auOptions -AfterDeleted -Path "$RegPath_AU\AUOptions"
     }
 
     # --- Step 5: Clean up stale pause entries ---
@@ -223,7 +315,12 @@ try {
         'PauseQualityUpdates', 'PauseQualityUpdatesStartTime', 'PauseQualityUpdatesEndTime'
     )
     foreach ($v in $pauseValues) {
-        Remove-RegValue -Path $RegPath_WU -Name $v
+        $pauseBefore = Get-SafeRegistryValue -Path $RegPath_WU -Name $v
+        if ($null -ne $pauseBefore) {
+            Remove-RegValue -Path $RegPath_WU -Name $v
+            $changes += Add-Action -Description "Remove stale pause entry: $v" `
+                -Before $pauseBefore -AfterDeleted -Path "$RegPath_WU\$v"
+        }
     }
 
     # --- Step 6: Clear WU client internal policy cache ---
@@ -232,7 +329,8 @@ try {
     $updatePolicyPath = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy'
     if (Test-Path $updatePolicyPath) {
         Remove-Item -Path $updatePolicyPath -Recurse -Force -ErrorAction SilentlyContinue
-        $changes += 'Cleared UpdatePolicy cache'
+        $changes += Add-Action -Description 'Clear WU client UpdatePolicy cache (resolved-policy state)' `
+            -Before 'present' -AfterDeleted -Path $updatePolicyPath
     }
 
     # --- Step 7: Clear SoftwareDistribution folder ---
@@ -241,7 +339,8 @@ try {
     $sdPath = "$env:SystemRoot\SoftwareDistribution"
     if (Test-Path $sdPath) {
         Remove-Item -Path $sdPath -Recurse -Force -ErrorAction SilentlyContinue
-        $changes += 'Cleared SoftwareDistribution'
+        $changes += Add-Action -Description 'Clear SoftwareDistribution folder (forces fresh WU scan database)' `
+            -Before 'present' -AfterDeleted -Path $sdPath
     }
 
     # --- Step 8: Re-enable Windows Update services if disabled ---
@@ -250,7 +349,9 @@ try {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
         if ($null -ne $svc -and $svc.StartType -eq 'Disabled') {
             Set-Service -Name $svcName -StartupType Manual -ErrorAction SilentlyContinue
-            $changes += "Re-enabled $svcName service (was Disabled)"
+            $changes += Add-Action -Description "Re-enable $svcName service startup type" `
+                -Before 'Disabled' -After 'Manual' `
+                -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName\Start"
         }
     }
 
@@ -259,29 +360,42 @@ try {
     foreach ($svcName in $stopServices) {
         Start-Service -Name $svcName -ErrorAction SilentlyContinue
     }
-    $changes += 'Started WU services'
+    $svcStatusFinal = @{}
+    foreach ($svcName in $stopServices) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        $svcStatusFinal[$svcName] = if ($null -ne $svc) { "$($svc.Status)" } else { '<not found>' }
+    }
+    $startBefore = ($stopServices | ForEach-Object { "$_=$($svcStatusAfter[$_])" }) -join ', '
+    $startAfter  = ($stopServices | ForEach-Object { "$_=$($svcStatusFinal[$_])" }) -join ', '
+    $changes += Add-Action -Description 'Start WU-related services' -Before $startBefore -After $startAfter
 
     # Trigger Intune to re-deliver policies (rebuilds PolicyManager entries)
     $pushTask = Get-ScheduledTask -TaskName 'PushLaunch' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -ne $pushTask) {
         Start-ScheduledTask -TaskName $pushTask.TaskName -TaskPath $pushTask.TaskPath -ErrorAction SilentlyContinue
-        $changes += 'Triggered Intune policy re-sync (PushLaunch)'
+        $changes += Add-Action -Description 'Trigger Intune policy re-sync (PushLaunch scheduled task)' `
+            -Before 'not triggered' -After 'triggered' `
+            -Path "$($pushTask.TaskPath)$($pushTask.TaskName)"
+    }
+    else {
+        $changes += Add-Note 'PushLaunch scheduled task not found — Intune re-sync skipped'
     }
 
     # Trigger WU scan via usoclient
     try {
         Start-Process -FilePath 'usoclient' -ArgumentList 'StartScan' -NoNewWindow -Wait -ErrorAction Stop
-        $changes += 'Triggered WU scan'
+        $changes += Add-Action -Description 'Trigger Windows Update scan (usoclient StartScan)' `
+            -Before 'not triggered' -After 'triggered'
     }
     catch {
-        $changes += 'WU scan trigger skipped (UsoClient unavailable)'
+        $changes += Add-Note 'WU scan trigger skipped (usoclient unavailable)'
     }
 
     # --- Done ---
     $msg = Format-Output -Result 'REMEDIATED' `
         -Reason "Blockers removed, WU state reset — device ready for WUfB policy" `
         -Changes $changes
-    Write-Log "REMEDIATED: $($changes -join '; ')"
+    Write-Log "REMEDIATED: $script:actionNum actions performed"
     Write-Output $msg
     exit 0
 }
