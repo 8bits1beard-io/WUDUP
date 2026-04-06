@@ -55,12 +55,13 @@ $RegPath_AU = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
 # as SYSTEM in a non-interactive session 0 — colors stay off there so the portal
 # shows clean plain text instead of escape-code garbage. PS 5.1 compatible.
 
+$script:IsSystem = $false
 $script:UseColor = $false
 try {
     $vtOk     = [bool]$Host.UI.SupportsVirtualTerminal
     $interact = [Environment]::UserInteractive
-    $isSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
-    if ($vtOk -and $interact -and -not $isSystem) { $script:UseColor = $true }
+    $script:IsSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
+    if ($vtOk -and $interact -and -not $script:IsSystem) { $script:UseColor = $true }
 }
 catch { }
 
@@ -111,14 +112,30 @@ function Set-RegDWord {
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
 }
 
+$script:LogFilePath = Join-Path $env:ProgramData 'WUDUP\Logs\remediate.log'
+
 function Write-Log {
     param([string]$Message)
     try {
-        $logDir = Join-Path $env:ProgramData 'WUDUP\Logs'
+        $logDir = Split-Path $script:LogFilePath -Parent
         if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
-        $logFile = Join-Path $logDir 'remediate.log'
         $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        Add-Content -Path $logFile -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
+        Add-Content -Path $script:LogFilePath -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+
+# Writes the FULL verbose remediation report to the log file with a clean separator.
+# Always called regardless of output mode so the device retains the complete report.
+function Write-LogReport {
+    param([string]$Report)
+    try {
+        $logDir = Split-Path $script:LogFilePath -Parent
+        if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $separator = "`n----- [$timestamp] -----"
+        Add-Content -Path $script:LogFilePath -Value $separator -ErrorAction SilentlyContinue
+        Add-Content -Path $script:LogFilePath -Value $Report -ErrorAction SilentlyContinue
     }
     catch { }
 }
@@ -146,6 +163,37 @@ function Format-Output {
         $lines += "Actions:"
         foreach ($c in $Changes) { $lines += $c }
     }
+    return ($lines -join "`n")
+}
+
+# Compact output for Intune Proactive Remediation portal display.
+# Lead with the result, give a one-line action count, list any WARNING notes
+# (the things that couldn't be auto-fixed), and point to the log file.
+# Used automatically when running as SYSTEM (Intune context).
+function Format-CompactOutput {
+    param(
+        [string]$Result,           # REMEDIATED / SKIPPED / ERROR
+        [string]$Reason,           # One-line summary
+        [int]$ActionCount,
+        [string[]]$Warnings,       # Lines starting with WARNING that need admin attention
+        [string]$LogPath
+    )
+    $lines = @()
+    $lines += "$Result - $Reason"
+
+    if ($ActionCount -gt 0) {
+        $lines += "Actions performed: $ActionCount (see log for before/after detail)"
+    }
+
+    if ($Warnings -and $Warnings.Count -gt 0) {
+        $lines += ""
+        foreach ($w in $Warnings) { $lines += $w }
+    }
+
+    if ($LogPath) {
+        $lines += "Full report: $LogPath"
+    }
+
     return ($lines -join "`n")
 }
 
@@ -179,10 +227,14 @@ function Add-Action {
 }
 
 # Builds a numbered note line (no before/after — for warnings or status messages).
+# Notes starting with "WARNING" are also tracked separately for the compact output.
 function Add-Note {
     param([string]$Message)
     $script:actionNum++
     $num = '{0:D2}' -f $script:actionNum
+    if ($Message -like 'WARNING*') {
+        $script:Warnings += $Message
+    }
     return @("  [$num] $Message")
 }
 
@@ -194,6 +246,7 @@ try {
     Write-Log "Remediation started"
     $changes = @()
     $script:actionNum = 0
+    $script:Warnings = @()
 
     # --- Step 0: SCCM guard ---
     $sccmService = Get-Service -Name 'ccmexec' -ErrorAction SilentlyContinue
@@ -207,11 +260,14 @@ try {
         if (-not $wuShiftedToIntune -and -not $Config_AllowOnSCCM) {
             $skipNotes  = Add-Note "SCCM detected (CoManagementFlags=$(Format-Val $coMgmtFlags), bit 4 NOT set)"
             $skipNotes += Add-Note 'Set $Config_AllowOnSCCM = $true to override and force remediation'
-            $msg = Format-Output -Result 'SKIPPED' `
+            $verboseMsg = Format-Output -Result 'SKIPPED' `
                 -Reason "SCCM/ConfigMgr manages WU workload — local changes will be overwritten" `
                 -Changes $skipNotes
-            Write-Log "SKIPPED: SCCM controls WU workload"
-            Write-Output $msg
+            $compactMsg = Format-CompactOutput -Result 'SKIPPED' `
+                -Reason "SCCM manages WU workload (CoManagementFlags=$(Format-Val $coMgmtFlags), bit 4 NOT set)" `
+                -ActionCount 0 -Warnings @() -LogPath $script:LogFilePath
+            Write-LogReport -Report $verboseMsg
+            if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
             exit 1
         }
 
@@ -392,16 +448,21 @@ try {
     }
 
     # --- Done ---
-    $msg = Format-Output -Result 'REMEDIATED' `
+    $verboseMsg = Format-Output -Result 'REMEDIATED' `
         -Reason "Blockers removed, WU state reset — device ready for WUfB policy" `
         -Changes $changes
-    Write-Log "REMEDIATED: $script:actionNum actions performed"
-    Write-Output $msg
+    $compactMsg = Format-CompactOutput -Result 'REMEDIATED' `
+        -Reason 'Blockers removed, WU state reset' `
+        -ActionCount $script:actionNum `
+        -Warnings $script:Warnings `
+        -LogPath $script:LogFilePath
+    Write-LogReport -Report $verboseMsg
+    if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
     exit 0
 }
 catch {
-    $msg = Format-Output -Result 'ERROR' -Reason "Remediation failed — $($_.Exception.Message)"
-    Write-Log "ERROR: $($_.Exception.Message)"
-    Write-Output $msg
+    $errMsg = "ERROR - Remediation failed: $($_.Exception.Message)"
+    Write-Log $errMsg
+    Write-Output $errMsg
     exit 1
 }

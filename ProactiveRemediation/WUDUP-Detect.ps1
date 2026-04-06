@@ -82,12 +82,13 @@ $RegPath_DO_MDM    = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Deli
 # as SYSTEM in a non-interactive session 0 — colors stay off there so the portal
 # shows clean plain text instead of escape-code garbage. PS 5.1 compatible.
 
+$script:IsSystem = $false
 $script:UseColor = $false
 try {
     $vtOk     = [bool]$Host.UI.SupportsVirtualTerminal
     $interact = [Environment]::UserInteractive
-    $isSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
-    if ($vtOk -and $interact -and -not $isSystem) { $script:UseColor = $true }
+    $script:IsSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
+    if ($vtOk -and $interact -and -not $script:IsSystem) { $script:UseColor = $true }
 }
 catch { }
 
@@ -136,14 +137,30 @@ function Get-SafeRegistryValue {
     return $null
 }
 
+$script:LogFilePath = Join-Path $env:ProgramData 'WUDUP\Logs\detect.log'
+
 function Write-Log {
     param([string]$Message)
     try {
-        $logDir = Join-Path $env:ProgramData 'WUDUP\Logs'
+        $logDir = Split-Path $script:LogFilePath -Parent
         if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
-        $logFile = Join-Path $logDir 'detect.log'
         $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        Add-Content -Path $logFile -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
+        Add-Content -Path $script:LogFilePath -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+
+# Writes the FULL verbose detection report to the log file with a clean separator.
+# Always called regardless of output mode so the device retains the complete report.
+function Write-LogReport {
+    param([string]$Report)
+    try {
+        $logDir = Split-Path $script:LogFilePath -Parent
+        if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $separator = "`n----- [$timestamp] -----"
+        Add-Content -Path $script:LogFilePath -Value $separator -ErrorAction SilentlyContinue
+        Add-Content -Path $script:LogFilePath -Value $Report -ErrorAction SilentlyContinue
     }
     catch { }
 }
@@ -202,6 +219,43 @@ function Format-Output {
     return ($lines -join "`n")
 }
 
+# Compact output for Intune Proactive Remediation portal display.
+# Intune's Output column truncates at ~2 KB and is narrow — verbose multi-line
+# blocks for every check make it impossible to spot what actually failed. This
+# format leads with the result, lists ONLY failed checks (one per line), gives
+# a one-line health summary, and points to the log file for the full report.
+# Used automatically when running as SYSTEM (Intune context).
+function Format-CompactOutput {
+    param(
+        [string]$Result,           # COMPLIANT / NON-COMPLIANT / ERROR
+        [string]$Reason,           # One-line summary
+        [array]$FailedChecks,      # PSCustomObjects with Number/Name/Current
+        [string]$HealthOneLine,    # Single-line health summary
+        [string]$LogPath           # Where to find the full report
+    )
+    $lines = @()
+    $lines += "$Result - $Reason"
+
+    if ($FailedChecks -and $FailedChecks.Count -gt 0) {
+        $lines += ""
+        foreach ($fc in $FailedChecks) {
+            $num = '{0:D2}' -f $fc.Number
+            $lines += "[$num] $($fc.Name): $($fc.Current)"
+        }
+    }
+
+    if ($HealthOneLine) {
+        $lines += ""
+        $lines += "Health: $HealthOneLine"
+    }
+
+    if ($LogPath) {
+        $lines += "Full report: $LogPath"
+    }
+
+    return ($lines -join "`n")
+}
+
 # Formats a registry value for display: $null -> <not set>, '' -> <empty>, else stringified.
 function Format-Val {
     param($Value)
@@ -223,6 +277,13 @@ function Add-Check {
     $script:checkNum++
     $num = '{0:D2}' -f $script:checkNum
     $cur = Format-Val $CurrentValue
+    if ($Status -eq 'FAIL') {
+        $script:FailedChecks += [PSCustomObject]@{
+            Number  = $script:checkNum
+            Name    = $Name
+            Current = $cur
+        }
+    }
     $statusTag = Colorize-Status $Status
     $lines = @()
     $lines += "  [$num] $statusTag $Name"
@@ -384,6 +445,7 @@ try {
     $indicators = @()
     $checks = @()
     $script:checkNum = 0
+    $script:FailedChecks = @()
 
     # --- 1. Update Blocker Checks ---
     $noAutoUpdate = Get-SafeRegistryValue -Path $RegPath_AU -Name 'NoAutoUpdate'
@@ -825,18 +887,35 @@ try {
         $remediation += "Investigate why the WU client is not scanning (manual action required)"
     }
 
+    # --- Build a single-line health summary for the compact (Intune) output ---
+    $ringPart = "Ring=$(if ($hasUpdateRing) { 'Active' } else { 'None' })"
+    $mdmPart  = if ($mdmHealth.Enrolled) {
+        $p = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'CoMgmt' } else { 'Intune' }
+        "MDM=$p"
+    } else { 'MDM=None' }
+    $scanPart = if ($null -ne $scanStatus.AgeDays) { "Scan=$($scanStatus.AgeDays)d" } else { 'Scan=?' }
+    $rebootPart = "Reboot=$(if ($pendingReboot) { 'Yes' } else { 'No' })"
+    $compactHealth = "$ringPart | $mdmPart | $scanPart | $rebootPart"
+
     # --- Output result ---
     if ($issues.Count -gt 0) {
-        $reason = "$($issues.Count) issue$(if ($issues.Count -gt 1) { 's' }) found — device is not WUfB compliant"
-        $msg = Format-Output -Result 'NON-COMPLIANT' `
-            -Reason $reason `
+        $reason = "$($issues.Count) issue$(if ($issues.Count -gt 1) { 's' }) found"
+        $verboseMsg = Format-Output -Result 'NON-COMPLIANT' `
+            -Reason "$reason — device is not WUfB compliant" `
             -Checks $checks `
             -Issues $issues `
             -Remediation $remediation `
             -Health $healthLines `
             -Policy $indicators
-        Write-Log "NON-COMPLIANT: $($issues -join '; ')"
-        Write-Output $msg
+        $compactMsg = Format-CompactOutput -Result 'NON-COMPLIANT' `
+            -Reason $reason `
+            -FailedChecks $script:FailedChecks `
+            -HealthOneLine $compactHealth `
+            -LogPath $script:LogFilePath
+        # Always log the full verbose report for on-device troubleshooting
+        Write-LogReport -Report $verboseMsg
+        # Intune (SYSTEM) gets the compact form; interactive runs get the verbose form
+        if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
         exit 1
     }
 
@@ -845,19 +924,25 @@ try {
     if ($hasWSUS) {
         $notes += "Stale WSUS config present ($wuServer) but fully overridden — WUfB is in control"
     }
-    $msg = Format-Output -Result 'COMPLIANT' `
+    $verboseMsg = Format-Output -Result 'COMPLIANT' `
         -Reason 'WUfB is managing all update types on this device' `
         -Checks $checks `
         -Issues $notes `
         -Health $healthLines `
         -Policy $indicators
-    Write-Log "COMPLIANT"
-    Write-Output $msg
+    $compactMsg = Format-CompactOutput -Result 'COMPLIANT' `
+        -Reason 'WUfB managing all updates' `
+        -FailedChecks @() `
+        -HealthOneLine $compactHealth `
+        -LogPath $script:LogFilePath
+    Write-LogReport -Report $verboseMsg
+    if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
     exit 0
 }
 catch {
-    $msg = Format-Output -Result 'ERROR' -Reason "Detection failed — $($_.Exception.Message)"
-    Write-Log "ERROR: $($_.Exception.Message)"
-    Write-Output $msg
+    $errMsg = "ERROR - Detection failed: $($_.Exception.Message)"
+    Write-Log $errMsg
+    # Errors are always short — same in both modes
+    Write-Output $errMsg
     exit 1
 }

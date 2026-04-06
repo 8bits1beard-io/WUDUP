@@ -15,7 +15,29 @@ Both scripts run as SYSTEM, are non-interactive, and produce a numbered, structu
 
 ## Example output
 
-When run interactively, statuses are color-coded (green PASS, red FAIL, yellow SKIP). When run by Intune as SYSTEM, colors are automatically suppressed so the portal shows clean plain text.
+Both scripts emit two different output formats depending on context:
+
+- **Run by Intune as SYSTEM** → a *compact* summary that fits in the Intune Output column without truncation. Shows the result, only the failed checks (one per line, with the check number for cross-reference), a one-line health summary, and a pointer to the full log file on the device.
+- **Run interactively for testing** → the full verbose report with all 18 checks, current/expected values, registry paths, issues, remediation guidance, health summary, and policy indicators. ANSI color is also enabled (green PASS, red FAIL, yellow SKIP).
+- **Always** → the full verbose report is appended to `%ProgramData%\WUDUP\Logs\detect.log` (or `remediate.log`) on the device, regardless of which output format went to stdout. So you get the clean Intune view AND the complete forensic detail on the device.
+
+### What Intune sees (compact, ~500 bytes)
+
+```
+NON-COMPLIANT - 6 issues found
+
+[11] SetPolicyDrivenUpdateSourceForFeatureUpdates: GP=<not set>, MDM=<not set>
+[12] SetPolicyDrivenUpdateSourceForQualityUpdates: GP=<not set>, MDM=<not set>
+[13] SetPolicyDrivenUpdateSourceForDriverUpdates: GP=<not set>, MDM=<not set>
+[14] SetPolicyDrivenUpdateSourceForOtherUpdates: GP=<not set>, MDM=<not set>
+[16] Intune Update Ring delivery: Not detected
+[17] MDM enrollment health: Not enrolled (no enrollment with EnrollmentState=1)
+
+Health: Ring=None | MDM=None | Scan=2d | Reboot=No
+Full report: C:\ProgramData\WUDUP\Logs\detect.log
+```
+
+### What you see when testing locally (verbose)
 
 ```
 === WUDUP Detection ===
@@ -61,7 +83,15 @@ Management Channel:
   Pending reboot: No
 ```
 
-The remediation script produces a similar report with numbered actions showing **before** and **after** values for every change made:
+The remediation script follows the same dual-output pattern. Intune sees a one-line summary plus any warnings:
+
+```
+REMEDIATED - Blockers removed, WU state reset
+Actions performed: 12 (see log for before/after detail)
+Full report: C:\ProgramData\WUDUP\Logs\remediate.log
+```
+
+The local log gets the full numbered action list with before/after values for every change:
 
 ```
 === WUDUP Remediation ===

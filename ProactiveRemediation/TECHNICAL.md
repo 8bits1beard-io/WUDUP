@@ -130,7 +130,20 @@ A compliant exit may still include a note line if a stale WSUS server is configu
 
 ## Output format spec
 
-Every run produces a structured multi-section report (built by `Format-Output`) which Intune captures via stdout and displays in the device's remediation history. The exit code is what Intune actually uses for compliance — the text is for admins reading the report.
+The scripts emit **two different output formats** depending on context, controlled by the `$script:IsSystem` flag (the same SID check used for color suppression):
+
+| Context | stdout format | Log file |
+|---------|--------------|----------|
+| **SYSTEM (Intune Proactive Remediation)** | Compact (built by `Format-CompactOutput`) — result line, only failed checks (one per line), one-line health summary, log path. Typically 400–800 bytes, well under Intune's ~2 KB Output column truncation limit. | Full verbose report appended to `detect.log` / `remediate.log` |
+| **Interactive (local testing)** | Full verbose (built by `Format-Output`) — all 18 checks with current/expected/path, issues, remediation, health, policy indicators. ANSI color enabled. | Same full verbose report appended to log |
+
+The full verbose report is **always** written to the log regardless of stdout format, so the Intune view stays clean while the device retains complete forensic detail. `Write-LogReport` adds a `----- [timestamp] -----` separator before each report so the log is easy to scan when investigating a specific run.
+
+The exit code is what Intune actually uses for compliance — both output formats are for humans reading the report.
+
+### Verbose format (interactive)
+
+Every verbose run produces a structured multi-section report (built by `Format-Output`):
 
 Sections, in order:
 
