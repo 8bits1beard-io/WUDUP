@@ -167,31 +167,24 @@ function Format-Output {
 }
 
 # Compact output for Intune Proactive Remediation portal display.
-# Lead with the result, give a one-line action count, list any WARNING notes
-# (the things that couldn't be auto-fixed), and point to the log file.
-# Used automatically when running as SYSTEM (Intune context).
+# Verdict on line 1, any WARNING notes (things that couldn't be auto-fixed)
+# on subsequent lines. Full verbose report is always written to remediate.log
+# for on-device troubleshooting. Used automatically when running as SYSTEM.
 function Format-CompactOutput {
     param(
         [string]$Result,           # REMEDIATED / SKIPPED / ERROR
-        [string]$Reason,           # One-line summary
-        [int]$ActionCount,
-        [string[]]$Warnings,       # Lines starting with WARNING that need admin attention
-        [string]$LogPath
+        [string]$Reason,           # Required only for SKIPPED/ERROR
+        [string[]]$Warnings        # Lines starting with WARNING that need admin attention
     )
     $lines = @()
-    $lines += "$Result - $Reason"
-
-    if ($ActionCount -gt 0) {
-        $lines += "Actions performed: $ActionCount (see log for before/after detail)"
+    if ($Reason) {
+        $lines += "$Result - $Reason"
+    } else {
+        $lines += $Result
     }
 
     if ($Warnings -and $Warnings.Count -gt 0) {
-        $lines += ""
         foreach ($w in $Warnings) { $lines += $w }
-    }
-
-    if ($LogPath) {
-        $lines += "Full report: $LogPath"
     }
 
     return ($lines -join "`n")
@@ -264,8 +257,7 @@ try {
                 -Reason "SCCM/ConfigMgr manages WU workload — local changes will be overwritten" `
                 -Changes $skipNotes
             $compactMsg = Format-CompactOutput -Result 'SKIPPED' `
-                -Reason "SCCM manages WU workload (CoManagementFlags=$(Format-Val $coMgmtFlags), bit 4 NOT set)" `
-                -ActionCount 0 -Warnings @() -LogPath $script:LogFilePath
+                -Reason "SCCM manages WU workload (CoManagementFlags=$(Format-Val $coMgmtFlags), bit 4 NOT set)"
             Write-LogReport -Report $verboseMsg
             if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
             exit 1
@@ -452,10 +444,7 @@ try {
         -Reason "Blockers removed, WU state reset — device ready for WUfB policy" `
         -Changes $changes
     $compactMsg = Format-CompactOutput -Result 'REMEDIATED' `
-        -Reason 'Blockers removed, WU state reset' `
-        -ActionCount $script:actionNum `
-        -Warnings $script:Warnings `
-        -LogPath $script:LogFilePath
+        -Warnings $script:Warnings
     Write-LogReport -Report $verboseMsg
     if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
     exit 0

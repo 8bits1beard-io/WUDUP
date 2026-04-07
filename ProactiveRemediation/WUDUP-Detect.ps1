@@ -220,37 +220,23 @@ function Format-Output {
 }
 
 # Compact output for Intune Proactive Remediation portal display.
-# Intune's Output column truncates at ~2 KB and is narrow — verbose multi-line
-# blocks for every check make it impossible to spot what actually failed. This
-# format leads with the result, lists ONLY failed checks (one per line), gives
-# a one-line health summary, and points to the log file for the full report.
-# Used automatically when running as SYSTEM (Intune context).
+# Intune's Output column is narrow and truncated — admins need to see at a
+# glance what failed, nothing else. Verdict on line 1, one failed check per
+# line after. The full verbose report is always written to detect.log for
+# on-device troubleshooting. Used automatically when running as SYSTEM.
 function Format-CompactOutput {
     param(
         [string]$Result,           # COMPLIANT / NON-COMPLIANT / ERROR
-        [string]$Reason,           # One-line summary
-        [array]$FailedChecks,      # PSCustomObjects with Number/Name/Current
-        [string]$HealthOneLine,    # Single-line health summary
-        [string]$LogPath           # Where to find the full report
+        [array]$FailedChecks       # PSCustomObjects with Number/Name/Current
     )
     $lines = @()
-    $lines += "$Result - $Reason"
+    $lines += $Result
 
     if ($FailedChecks -and $FailedChecks.Count -gt 0) {
-        $lines += ""
         foreach ($fc in $FailedChecks) {
             $num = '{0:D2}' -f $fc.Number
             $lines += "[$num] $($fc.Name): $($fc.Current)"
         }
-    }
-
-    if ($HealthOneLine) {
-        $lines += ""
-        $lines += "Health: $HealthOneLine"
-    }
-
-    if ($LogPath) {
-        $lines += "Full report: $LogPath"
     }
 
     return ($lines -join "`n")
@@ -887,16 +873,6 @@ try {
         $remediation += "Investigate why the WU client is not scanning (manual action required)"
     }
 
-    # --- Build a single-line health summary for the compact (Intune) output ---
-    $ringPart = "Ring=$(if ($hasUpdateRing) { 'Active' } else { 'None' })"
-    $mdmPart  = if ($mdmHealth.Enrolled) {
-        $p = if ($mdmHealth.Provider -eq 'WMI_Bridge_SCCM_Server') { 'CoMgmt' } else { 'Intune' }
-        "MDM=$p"
-    } else { 'MDM=None' }
-    $scanPart = if ($null -ne $scanStatus.AgeDays) { "Scan=$($scanStatus.AgeDays)d" } else { 'Scan=?' }
-    $rebootPart = "Reboot=$(if ($pendingReboot) { 'Yes' } else { 'No' })"
-    $compactHealth = "$ringPart | $mdmPart | $scanPart | $rebootPart"
-
     # --- Output result ---
     if ($issues.Count -gt 0) {
         $reason = "$($issues.Count) issue$(if ($issues.Count -gt 1) { 's' }) found"
@@ -908,10 +884,7 @@ try {
             -Health $healthLines `
             -Policy $indicators
         $compactMsg = Format-CompactOutput -Result 'NON-COMPLIANT' `
-            -Reason $reason `
-            -FailedChecks $script:FailedChecks `
-            -HealthOneLine $compactHealth `
-            -LogPath $script:LogFilePath
+            -FailedChecks $script:FailedChecks
         # Always log the full verbose report for on-device troubleshooting
         Write-LogReport -Report $verboseMsg
         # Intune (SYSTEM) gets the compact form; interactive runs get the verbose form
@@ -931,10 +904,7 @@ try {
         -Health $healthLines `
         -Policy $indicators
     $compactMsg = Format-CompactOutput -Result 'COMPLIANT' `
-        -Reason 'WUfB managing all updates' `
-        -FailedChecks @() `
-        -HealthOneLine $compactHealth `
-        -LogPath $script:LogFilePath
+        -FailedChecks @()
     Write-LogReport -Report $verboseMsg
     if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
     exit 0
