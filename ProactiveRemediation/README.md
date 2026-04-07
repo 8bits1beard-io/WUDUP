@@ -17,25 +17,23 @@ Both scripts run as SYSTEM, are non-interactive, and produce a numbered, structu
 
 Both scripts emit two different output formats depending on context:
 
-- **Run by Intune as SYSTEM** → a *compact* summary that fits in the Intune Output column without truncation. Shows the result, only the failed checks (one per line, with the check number for cross-reference), a one-line health summary, and a pointer to the full log file on the device.
+- **Run by Intune as SYSTEM** → a *minimal* summary that fits in the Intune Output column without truncation. Shows just the verdict on line 1 and any failed checks (one per line, with the check number for cross-reference). Nothing else — health context and the full report are written to the on-device log.
 - **Run interactively for testing** → the full verbose report with all 18 checks, current/expected values, registry paths, issues, remediation guidance, health summary, and policy indicators. ANSI color is also enabled (green PASS, red FAIL, yellow SKIP).
 - **Always** → the full verbose report is appended to `%ProgramData%\WUDUP\Logs\detect.log` (or `remediate.log`) on the device, regardless of which output format went to stdout. So you get the clean Intune view AND the complete forensic detail on the device.
 
-### What Intune sees (compact, ~500 bytes)
+### What Intune sees (compact)
 
 ```
-NON-COMPLIANT - 6 issues found
-
+NON-COMPLIANT
 [11] SetPolicyDrivenUpdateSourceForFeatureUpdates: GP=<not set>, MDM=<not set>
 [12] SetPolicyDrivenUpdateSourceForQualityUpdates: GP=<not set>, MDM=<not set>
 [13] SetPolicyDrivenUpdateSourceForDriverUpdates: GP=<not set>, MDM=<not set>
 [14] SetPolicyDrivenUpdateSourceForOtherUpdates: GP=<not set>, MDM=<not set>
 [16] Intune Update Ring delivery: Not detected
 [17] MDM enrollment health: Not enrolled (no enrollment with EnrollmentState=1)
-
-Health: Ring=None | MDM=None | Scan=2d | Reboot=No
-Full report: C:\ProgramData\WUDUP\Logs\detect.log
 ```
+
+A clean device shows just `COMPLIANT` on a single line.
 
 ### What you see when testing locally (verbose)
 
@@ -83,12 +81,17 @@ Management Channel:
   Pending reboot: No
 ```
 
-The remediation script follows the same dual-output pattern. Intune sees a one-line summary plus any warnings:
+The remediation script follows the same dual-output pattern. Intune sees just the verdict, plus any WARNING notes for things that couldn't be auto-fixed:
 
 ```
-REMEDIATED - Blockers removed, WU state reset
-Actions performed: 12 (see log for before/after detail)
-Full report: C:\ProgramData\WUDUP\Logs\remediate.log
+REMEDIATED
+```
+
+Or, when there's something an admin still needs to look at:
+
+```
+REMEDIATED
+WARNING: MDM AllowAutoUpdate=5 detected (auto updates disabled via Intune) — review device config profiles, cannot be fixed locally
 ```
 
 The local log gets the full numbered action list with before/after values for every change:
