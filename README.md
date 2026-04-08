@@ -1,121 +1,208 @@
-# WUDUP
+# WUDUP Proactive Remediation
 
-**Windows Update Dashboard: Unified Provisioning**
+> Find Windows devices that Intune thinks it's managing — but isn't — and fix them automatically.
 
-A PowerShell toolkit for auditing, diagnosing, and managing Windows Update configuration on Windows 10/11 devices. WUDUP detects your device's update management authority, reads all relevant policies, and displays a color-coded dashboard — or outputs structured data for fleet-scale automation.
+A pair of Intune Proactive Remediation scripts that verify a Windows device's update infrastructure is correctly set up for **Windows Update for Business (WUfB)**, and remove the blockers that silently take devices out of policy: leftover WSUS pointers, disabled services, stale GPO settings, dual-scan misconfigurations, missing `PolicyDrivenUpdateSource` keys, and more.
 
-Includes an Intune Proactive Remediation pair for ensuring devices are managed by Windows Update for Business (WUfB).
+The detection script answers a single question: **"Does this device have all the necessary settings so that Intune WUfB can manage all updates?"** The remediation script removes anything that says no.
 
-## Features
+- `WUDUP-Detect.ps1` — exit `0` = compliant, exit `1` = non-compliant (triggers remediation)
+- `WUDUP-Remediate.ps1` — removes blockers, resets WU client state, re-syncs Intune
 
-- **Management authority detection** — identifies SCCM (with co-management workload check), MDM/Intune (with enrollment verification), WSUS, WUfB/GPO, or local configuration
-- **Comprehensive policy audit** — reads 70+ registry values across GP, MDM, UX, and internal paths
-- **Update source verification** — PolicyDrivenSource keys, WSUS configuration, split-source detection, dual-scan flagging
-- **Runtime service state** — WU Agent (wuauserv), Update Orchestrator (UsoSvc), registered update services via COM API
-- **Pending reboot accuracy** — uses `Microsoft.Update.SystemInfo` COM API (same source as Settings app)
-- **Recent update history** — last 10 updates via `Microsoft.Update.Session` COM API
-- **Source switching** — switch between WUfB, WSUS, and Microsoft Update direct with automatic backup/restore
-- **Non-interactive report mode** — structured output for fleet collection and automation
-- **Intune Proactive Remediation** — detect + remediate script pair for WUfB compliance
+Both scripts run as SYSTEM, are non-interactive, and produce a numbered, structured report that tells you exactly which check failed, what the current value is, and what it should be.
+
+---
+
+## Example output
+
+Both scripts emit two different output formats depending on context:
+
+- **Run by Intune as SYSTEM** → a *minimal* summary that fits in the Intune Output column without truncation. Shows just the verdict on line 1 and any failed checks (one per line, with the check number for cross-reference).
+- **Run interactively for testing** → the full verbose report with all 18 checks, current/expected values, registry paths, issues, remediation guidance, health summary, and policy indicators. ANSI color is also enabled (green PASS, red FAIL, yellow SKIP).
+- **Detect is read-only** and writes nothing to disk. **Remediate** appends every change with before/after values to `%ProgramData%\WUDUP\Logs\remediate.log` so you have a forensic trail of what was modified on the device.
+
+### What Intune sees (compact)
+
+```
+NON-COMPLIANT
+[11] SetPolicyDrivenUpdateSourceForFeatureUpdates: GP=<not set>, MDM=<not set>
+[12] SetPolicyDrivenUpdateSourceForQualityUpdates: GP=<not set>, MDM=<not set>
+[13] SetPolicyDrivenUpdateSourceForDriverUpdates: GP=<not set>, MDM=<not set>
+[14] SetPolicyDrivenUpdateSourceForOtherUpdates: GP=<not set>, MDM=<not set>
+[16] Intune Update Ring delivery: Not detected
+[17] MDM enrollment health: Not enrolled (no enrollment with EnrollmentState=1)
+```
+
+A clean device shows just `COMPLIANT` on a single line.
+
+### What you see when testing locally (verbose)
+
+```
+=== WUDUP Detection ===
+NON-COMPLIANT — 6 issues found — device is not WUfB compliant
+
+Checks Performed:
+  [01] [PASS] NoAutoUpdate (1 = automatic updates disabled)
+         Current:  <not set>
+         Expected: <not set> or 0
+         Path:     HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoUpdate
+  [08] [PASS] wuauserv service startup type
+         Current:  Manual
+         Expected: Manual or Automatic (not Disabled)
+         Path:     HKLM:\SYSTEM\CurrentControlSet\Services\wuauserv\Start
+  [11] [FAIL] SetPolicyDrivenUpdateSourceForFeatureUpdates
+         Current:  GP=<not set>, MDM=<not set>
+         Expected: 0 (Windows Update) on GP path OR MDM path
+         Path:     GP: HKLM:\...\WindowsUpdate  |  MDM: HKLM:\...\PolicyManager\current\device\Update
+  [16] [FAIL] Intune Update Ring delivery
+         Current:  Not detected
+         Expected: Active — WUfB values delivered via PolicyManager Providers path
+         Path:     HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\<GUID>\default\device\Update
+  ... 18 checks total ...
+
+Issues Found:
+  Feature updates: PolicyDrivenSource not configured (missing)
+  Quality updates: PolicyDrivenSource not configured (missing)
+  Driver updates:  PolicyDrivenSource not configured (missing)
+  Other updates:   PolicyDrivenSource not configured (missing)
+  No Intune WUfB Update Ring is actively delivering policy to this device
+  No active Intune MDM enrollment — device cannot receive WUfB policy
+
+Remediation:
+  Set all 4 PolicyDrivenSource keys to 0 (remediation script handles this automatically)
+  Assign a WUfB Update Ring to this device in Intune
+  Re-enroll this device in Intune (manual action required)
+
+Management Channel:
+  Update Ring:    Not detected
+  MDM:            Not enrolled
+  Last WU scan:   2 days ago
+  Last install:   2026-04-04 16:32
+  Pending reboot: No
+```
+
+The remediation script follows the same dual-output pattern. Intune sees just the verdict, plus any WARNING notes for things that couldn't be auto-fixed:
+
+```
+REMEDIATED
+```
+
+Or, when there's something an admin still needs to look at:
+
+```
+REMEDIATED
+WARNING: MDM AllowAutoUpdate=5 detected (auto updates disabled via Intune) — review device config profiles, cannot be fixed locally
+```
+
+The local log gets the full numbered action list with before/after values for every change:
+
+```
+=== WUDUP Remediation ===
+REMEDIATED
+
+Reason: Blockers removed, WU state reset — device ready for WUfB policy
+
+Actions:
+  [01] Stop WU-related services
+       Before: wuauserv=Running, bits=Running, UsoSvc=Running
+       After:  wuauserv=Stopped, bits=Stopped, UsoSvc=Stopped
+  [02] Remove WSUS value: WUServer
+       Before: http://wsus.example.com:8530
+       After:  <deleted>
+       Path:   HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\WUServer
+  [05] Set SetPolicyDrivenUpdateSourceForFeatureUpdates = 0 (Windows Update)
+       Before: <not set>
+       After:  0
+       Path:   HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\SetPolicyDrivenUpdateSourceForFeatureUpdates
+  ...
+```
+
+---
 
 ## Requirements
 
 - Windows 10 or Windows 11
-- PowerShell 5.1 or later (ships with Windows)
-- Administrator privileges for modifications (read-only audit works without)
-- No external modules or dependencies
+- PowerShell 5.1 or later (no modules required — pure registry, services, and COM)
+- Microsoft Intune subscription with the **Endpoint analytics > Remediations** (Proactive Remediations) feature
+- Devices enrolled in Intune (or co-managed via SCCM with the Windows Update workload shifted to Intune)
+- Local admin / SYSTEM context for the remediation script to make changes
 
-## Quick Start
+---
 
-### Interactive Dashboard
+## Quick start
+
+1. **Download** `WUDUP-Detect.ps1` and `WUDUP-Remediate.ps1` from this folder.
+2. In the Intune admin center, go to **Devices → Remediations** (or **Endpoint analytics → Proactive remediations**).
+3. **Create script package**:
+   - Detection script file → `WUDUP-Detect.ps1`
+   - Remediation script file → `WUDUP-Remediate.ps1`
+   - **Run this script using the logged-on credentials** → **No** (must run as SYSTEM)
+   - **Enforce script signature check** → No (or sign the scripts yourself)
+   - **Run script in 64-bit PowerShell** → Yes
+4. **Assign** to your target device groups and pick a schedule (daily is typical).
+5. After the next check-in, review the **Device status** view — the structured report appears under **Pre-remediation detection output** and **Post-remediation detection output**.
+
+You can also run either script locally for testing:
 
 ```powershell
-# Run as Administrator for full functionality
-.\WUDUP.ps1
+# As admin, in an elevated PowerShell session
+.\WUDUP-Detect.ps1
+.\WUDUP-Remediate.ps1
 ```
 
-Displays a color-coded dashboard with all Windows Update configuration. If running as admin, offers a modification menu.
+Local runs produce the same output but with ANSI color highlighting.
 
-### Structured Report (Automation)
+---
 
-```powershell
-# Output structured object for automation
-.\WUDUP.ps1 -Report
+## Configuration
 
-# Export to JSON
-.\WUDUP.ps1 -Report | ConvertTo-Json -Depth 5 | Out-File report.json
+All configuration flags live at the top of each script — edit them before uploading to Intune.
 
-# Collect across fleet via Invoke-Command
-Invoke-Command -ComputerName $devices -FilePath .\WUDUP.ps1 -ArgumentList @($true)
-```
+### `WUDUP-Detect.ps1`
 
-The `-Report` switch suppresses all interactive output and returns a single `PSCustomObject` containing all collected data.
+| Flag | Default | Effect |
+|------|---------|--------|
+| `$Config_RequireUpdateRing` | `$true` | Require an Intune Update Ring to be actively delivering WUfB policy. Set to `$false` if you only want to verify the device *can* receive policy (don't enforce that it currently *is*). |
+| `$Config_RequireMDMEnrollment` | `$true` | Require an active MDM enrollment (`EnrollmentState=1`). Set to `$false` if devices may receive WUfB policy via GPO instead of Intune. |
+| `$Config_MaxScanAgeDays` | `7` | Flag non-compliant if the WU client hasn't scanned within this many days. Set to `0` to disable the check. |
 
-## Intune Proactive Remediation
+### `WUDUP-Remediate.ps1`
 
-The [`ProactiveRemediation/`](ProactiveRemediation/) folder contains a detect + remediate script pair for ensuring devices are managed by WUfB.
+| Flag | Default | Effect |
+|------|---------|--------|
+| `$Config_AllowOnSCCM` | `$false` | If `$true`, the remediation script will run even on SCCM-managed devices. Default is to skip those devices since SCCM will overwrite the local changes. Co-managed devices with the WU workload shifted to Intune (`CoManagementFlags` bit 4) are remediated regardless. |
 
-- **Detection** checks for 6 blocker conditions, collects WUfB indicators (PolicyDrivenSource, deferrals, deadlines, version targeting, etc.), detects WSUS/SCCM/co-management, and optionally validates Update Ring delivery, MDM enrollment health, and WU scan freshness
-- **Remediation** removes blockers (WSUS config, `NoAutoUpdate`, `AUOptions=1`, disabled services) and sets PolicyDrivenSource — it does not set update policies (those come from your Intune WUfB Update Ring)
+---
 
-See the [ProactiveRemediation README](ProactiveRemediation/README.md) for full detection logic, remediation actions, and deployment instructions.
+## How it works (in 30 seconds)
 
-## Dashboard Sections
+The detection script runs **18 numbered checks** and collects every issue into a single list before deciding compliance. There's no short-circuit — a non-compliant device's report shows you the *complete* picture in one Intune run, not just the first thing that failed.
 
-| Section | What It Shows |
-|---------|---------------|
-| OS Information | Build, version, edition, architecture |
-| Management Authority | Who manages updates (SCCM/Intune/WSUS/GPO/Local), co-management state |
-| Windows Update Service | wuauserv + UsoSvc status and startup type |
-| Update Status | Pending reboot (COM API), last install/scan time |
-| OS Version Pinning | TargetReleaseVersion, ProductVersion |
-| Update Source | WSUS server, UseWUServer, BlockInternetWU, dual-scan detection |
-| Policy-Driven Update Source | Per-type source (Feature/Quality/Driver/Other) — shown only when configured |
-| Deferral Policies | Feature/quality deferral days and source |
-| Compliance Deadlines | Feature/quality deadlines and grace periods — shown only when configured |
-| Channel / Preview Builds | BranchReadinessLevel, ManagePreviewBuilds — shown only when configured |
-| Auto-Update Behavior | AUOptions, scheduled install, always reboot, SetDisableUXWUAccess |
-| Pause Status | Feature/quality pause with expiry |
-| Active Hours | Policy-enforced or user-set, smart active hours |
-| Delivery Optimization | Download mode and source |
-| Recent Update History | Last 10 updates with result status — shown only when history available |
-| Registered Update Services | Runtime WU agent services via COM API — shown only when services registered |
+The checks fall into four buckets:
 
-## Modification Menu (Admin Only)
+1. **Update blockers (10 checks)** — registry values and service states that prevent WU from running at all (`NoAutoUpdate`, `AUOptions=1`, `DoNotConnectToWindowsUpdateInternetLocations`, `DisableWindowsUpdateAccess`, MDM `AllowAutoUpdate=5`, MDM `AllowUpdateService=0`, `wuauserv`/`UsoSvc` disabled, orphaned WSUS pointer, etc.)
+2. **SCCM check** — fails if SCCM is present and the WU workload hasn't been shifted to Intune via co-management
+3. **PolicyDrivenSource (4 checks)** — all four `SetPolicyDrivenUpdateSourceFor{Feature,Quality,Driver,Other}Updates` keys must equal `0` on either the GP or MDM path. This is the **core compliance gate**.
+4. **Opt-in health checks (3 checks)** — Update Ring delivery, MDM enrollment health, and WU scan freshness. Each can be disabled via the config flags.
 
-When running as Administrator, WUDUP offers an interactive menu:
+If everything passes, exit `0` (compliant). If anything fails, exit `1` (non-compliant), Intune triggers `WUDUP-Remediate.ps1`, and the remediation script removes the blockers, resets the WU client state, and triggers an Intune re-sync + WU scan.
 
-- **[1]** Set OS version pin
-- **[2]** Remove OS version pin
-- **[3]** Set deferral periods
-- **[4]** Configure auto-update behavior
-- **[5]** Set active hours
-- **[6]** Pause updates
-- **[7]** Unpause updates
-- **[S]** Switch update source (WUfB / WSUS / Direct)
-- **[B]** Backup current settings
-- **[R]** Restore settings from backup
-- **[8]** Refresh report
-- **[0]** Exit
+**For the full check list, registry paths, output format spec, and remediation step details, see [TECHNICAL.md](TECHNICAL.md).**
 
-Source switching automatically backs up current settings before making changes. Backups are stored as JSON at `%ProgramData%\WUDUP\Backups\`. Backups use a typed format (v2) that records the registry value type (DWord, String, ExpandString, Binary, etc.) alongside each value so it is restored with the correct type. The MDM PolicyManager path is included in backups; if the device has an active Intune enrollment, MDM values will be re-delivered on the next sync and will overwrite any restored values.
+---
 
-## Data Sources
+## Logging
 
-WUDUP reads from 12 registry base paths, 3 Windows services, 3 COM objects, and 1 WMI class. See [`SOURCES.md`](SOURCES.md) for the complete reference with every registry value name, type, and description.
+Detect is read-only and writes nothing to disk — its output is stdout only (Intune captures it).
 
-## Key Concepts
+Remediate appends every run to `%ProgramData%\WUDUP\Logs\remediate.log` with the full numbered action list and before/after values for every change. This persists across runs and is the forensic trail for what was modified on the device.
 
-**Split-source (full)** — WSUS configured but `SetPolicyDrivenUpdateSourceFor*=0` for all four update types (Feature, Quality, Driver, Other). This is a valid WUfB configuration — WSUS is effectively overridden.
+---
 
-**Split-source (partial)** — WSUS configured with some `SetPolicyDrivenUpdateSourceFor*` keys set to `0` (WU) and others set to `1` (WSUS). This is a misconfiguration — all update types must use WUfB. Flagged as non-compliant.
+## Related
 
-**Dual-scan** — WSUS active with WUfB deferral policies but no PolicyDrivenSource override. This is a misconfiguration where the WU client may scan both WSUS and Microsoft Update unpredictably.
+This is the Intune Proactive Remediation component of **WUDUP** (Windows Update Dashboard: Unified Provisioning). The parent repo also contains:
 
-**Stale MDM** — PolicyManager registry keys exist but no active enrollment in `HKLM:\SOFTWARE\Microsoft\Enrollments`. Indicates a device was previously MDM-managed but enrollment was removed.
+- `WUDUP.ps1` — interactive PowerShell dashboard for auditing and modifying WU configuration on a single device, with backup/restore and a source-switching workflow (WUfB / WSUS / Microsoft Update direct)
 
-**UseUpdateClassPolicySource** — Must be set to `1` in the AU registry subkey when writing PolicyDrivenSource keys via direct registry writes. GPO and CSP set this automatically; direct writes do not.
-
-## License
-
-This project is provided as-is for IT administration purposes.
+The PR scripts and `WUDUP.ps1` share detection logic, blocker lists, and remediation approaches — see `CLAUDE.md` in the repo root for the cross-script consistency rules.
