@@ -1,10 +1,10 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    WUDUP Remediation Script - Removes blockers so WUfB policy can take effect.
+    Remediation - Removes blockers so WUfB policy can take effect.
 
 .DESCRIPTION
-    Intune Proactive Remediation script. Runs when WUDUP-Detect.ps1 reports
+    Intune Proactive Remediation script. Runs when Detection.ps1 reports
     non-compliant (device not managed by WUfB).
 
     This script only removes configuration that blocks WUfB from managing the
@@ -28,7 +28,7 @@
 
 .NOTES
     Author:  Joshua Walderbach
-    Tool:    WUDUP Remediation v2.0.0
+    Tool:    Remediation v2.0.0
     Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
@@ -112,7 +112,7 @@ function Set-RegDWord {
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
 }
 
-$script:LogFilePath = Join-Path $env:ProgramData 'WUDUP\Logs\remediate.log'
+$script:LogFilePath = Join-Path $env:ProgramData 'WUfB-Remediation\remediate.log'
 
 function Write-Log {
     param([string]$Message)
@@ -154,7 +154,7 @@ function Format-Output {
         [string[]]$Changes     # List of actions taken
     )
     $lines = @()
-    $lines += "=== WUDUP Remediation ==="
+    $lines += "=== Remediation ==="
     $lines += "$(Colorize-Result $Result)"
     $lines += ""
     $lines += "Reason: $Reason"

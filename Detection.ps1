@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    WUDUP Detection Script - Checks if device is managed by Windows Update for Business.
+    Detection - Checks if device is managed by Windows Update for Business.
 
 .DESCRIPTION
     Intune Proactive Remediation detection script.
@@ -37,7 +37,7 @@
 
 .NOTES
     Author:  Joshua Walderbach
-    Tool:    WUDUP Detection v1.6.0
+    Tool:    Detection v1.6.0
     Created: 12 March 2026
     Context: Runs as SYSTEM via Intune Proactive Remediations
 #>
@@ -150,7 +150,7 @@ function Format-Output {
         [string[]]$Health          # Health check lines
     )
     $lines = @()
-    $lines += "=== WUDUP Detection ==="
+    $lines += "=== Detection ==="
     $lines += "$(Colorize-Result $Result) — $Reason"
 
     if ($Checks -and $Checks.Count -gt 0) {
@@ -718,7 +718,7 @@ try {
 
     # --- Compliance Deadlines ---
     # GP writes native names (ComplianceDeadlineForFU, ComplianceDeadline); MDM uses Configure* names
-    # Read GP first (both naming conventions), then MDM fallback — matches WUDUP.ps1 pattern
+    # Read GP first (both naming conventions), then MDM fallback
     $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ConfigureDeadlineForFeatureUpdates'
     if ($null -eq $deadlineFeature) { $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_WU -Name 'ComplianceDeadlineForFU' }
     if ($null -eq $deadlineFeature) { $deadlineFeature = Get-SafeRegistryValue -Path $RegPath_MDM -Name 'ConfigureDeadlineForFeatureUpdates' }

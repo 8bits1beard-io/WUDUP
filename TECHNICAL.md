@@ -1,6 +1,6 @@
-# WUDUP Proactive Remediation — Technical Reference
+# WUfB Proactive Remediation — Technical Reference
 
-Deep reference documentation for `WUDUP-Detect.ps1` and `WUDUP-Remediate.ps1`. For an overview, deployment instructions, and example output, see [README.md](README.md).
+Deep reference documentation for `Detection.ps1` and `Remediation.ps1`. For an overview, deployment instructions, and example output, see [README.md](README.md).
 
 ## Contents
 
@@ -147,7 +147,7 @@ Every verbose run produces a structured multi-section report (built by `Format-O
 
 Sections, in order:
 
-1. **Header** — `=== WUDUP Detection ===` and a one-line `RESULT — reason`
+1. **Header** — `=== Detection ===` and a one-line `RESULT — reason`
 2. **Checks Performed** — every blocker / SCCM / PolicyDrivenSource / WSUS / health check as a numbered `[NN] [PASS|FAIL|SKIP]` block, with current value, expected value, and registry path
 3. **Issues Found** *(non-compliant only)* — human-readable list of what's wrong
 4. **Remediation** *(non-compliant only)* — what to do, including notes when MDM-delivered blockers can't be auto-fixed
@@ -228,7 +228,7 @@ Each action is numbered in the output and shows the **before** and **after** val
 | 8    | Re-enable WU services | Sets `wuauserv` and `UsoSvc` to `Manual` startup if currently `Disabled` |
 | 9    | Start services + re-sync | Starts `wuauserv`, `bits`, `UsoSvc`; triggers the Intune `PushLaunch` scheduled task to force policy re-delivery; runs `usoclient StartScan` |
 
-Output is a structured `=== WUDUP Remediation ===` block with `REMEDIATED` / `SKIPPED` / `ERROR`, a reason line, and the numbered action list.
+Output is a structured `=== Remediation ===` block with `REMEDIATED` / `SKIPPED` / `ERROR`, a reason line, and the numbered action list.
 
 ---
 

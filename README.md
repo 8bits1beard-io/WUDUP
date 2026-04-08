@@ -1,4 +1,4 @@
-# WUDUP Proactive Remediation
+# WUfB Proactive Remediation
 
 > Find Windows devices that Intune thinks it's managing — but isn't — and fix them automatically.
 
@@ -6,8 +6,8 @@ A pair of Intune Proactive Remediation scripts that verify a Windows device's up
 
 The detection script answers a single question: **"Does this device have all the necessary settings so that Intune WUfB can manage all updates?"** The remediation script removes anything that says no.
 
-- `WUDUP-Detect.ps1` — exit `0` = compliant, exit `1` = non-compliant (triggers remediation)
-- `WUDUP-Remediate.ps1` — removes blockers, resets WU client state, re-syncs Intune
+- `Detection.ps1` — exit `0` = compliant, exit `1` = non-compliant (triggers remediation)
+- `Remediation.ps1` — removes blockers, resets WU client state, re-syncs Intune
 
 Both scripts run as SYSTEM, are non-interactive, and produce a numbered, structured report that tells you exactly which check failed, what the current value is, and what it should be.
 
@@ -19,7 +19,7 @@ Both scripts emit two different output formats depending on context:
 
 - **Run by Intune as SYSTEM** → a *minimal* summary that fits in the Intune Output column without truncation. Shows just the verdict on line 1 and any failed checks (one per line, with the check number for cross-reference).
 - **Run interactively for testing** → the full verbose report with all 18 checks, current/expected values, registry paths, issues, remediation guidance, health summary, and policy indicators. ANSI color is also enabled (green PASS, red FAIL, yellow SKIP).
-- **Detect is read-only** and writes nothing to disk. **Remediate** appends every change with before/after values to `%ProgramData%\WUDUP\Logs\remediate.log` so you have a forensic trail of what was modified on the device.
+- **Detection is read-only** and writes nothing to disk. **Remediation** appends every change with before/after values to `%ProgramData%\WUfB-Remediation\remediate.log` so you have a forensic trail of what was modified on the device.
 
 ### What Intune sees (compact)
 
@@ -38,7 +38,7 @@ A clean device shows just `COMPLIANT` on a single line.
 ### What you see when testing locally (verbose)
 
 ```
-=== WUDUP Detection ===
+=== Detection ===
 NON-COMPLIANT — 6 issues found — device is not WUfB compliant
 
 Checks Performed:
@@ -97,7 +97,7 @@ WARNING: MDM AllowAutoUpdate=5 detected (auto updates disabled via Intune) — r
 The local log gets the full numbered action list with before/after values for every change:
 
 ```
-=== WUDUP Remediation ===
+=== Remediation ===
 REMEDIATED
 
 Reason: Blockers removed, WU state reset — device ready for WUfB policy
@@ -131,11 +131,11 @@ Actions:
 
 ## Quick start
 
-1. **Download** `WUDUP-Detect.ps1` and `WUDUP-Remediate.ps1` from this folder.
+1. **Download** `Detection.ps1` and `Remediation.ps1` from this folder.
 2. In the Intune admin center, go to **Devices → Remediations** (or **Endpoint analytics → Proactive remediations**).
 3. **Create script package**:
-   - Detection script file → `WUDUP-Detect.ps1`
-   - Remediation script file → `WUDUP-Remediate.ps1`
+   - Detection script file → `Detection.ps1`
+   - Remediation script file → `Remediation.ps1`
    - **Run this script using the logged-on credentials** → **No** (must run as SYSTEM)
    - **Enforce script signature check** → No (or sign the scripts yourself)
    - **Run script in 64-bit PowerShell** → Yes
@@ -146,8 +146,8 @@ You can also run either script locally for testing:
 
 ```powershell
 # As admin, in an elevated PowerShell session
-.\WUDUP-Detect.ps1
-.\WUDUP-Remediate.ps1
+.\Detection.ps1
+.\Remediation.ps1
 ```
 
 Local runs produce the same output but with ANSI color highlighting.
@@ -158,7 +158,7 @@ Local runs produce the same output but with ANSI color highlighting.
 
 All configuration flags live at the top of each script — edit them before uploading to Intune.
 
-### `WUDUP-Detect.ps1`
+### `Detection.ps1`
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -166,7 +166,7 @@ All configuration flags live at the top of each script — edit them before uplo
 | `$Config_RequireMDMEnrollment` | `$true` | Require an active MDM enrollment (`EnrollmentState=1`). Set to `$false` if devices may receive WUfB policy via GPO instead of Intune. |
 | `$Config_MaxScanAgeDays` | `7` | Flag non-compliant if the WU client hasn't scanned within this many days. Set to `0` to disable the check. |
 
-### `WUDUP-Remediate.ps1`
+### `Remediation.ps1`
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -185,7 +185,7 @@ The checks fall into four buckets:
 3. **PolicyDrivenSource (4 checks)** — all four `SetPolicyDrivenUpdateSourceFor{Feature,Quality,Driver,Other}Updates` keys must equal `0` on either the GP or MDM path. This is the **core compliance gate**.
 4. **Opt-in health checks (3 checks)** — Update Ring delivery, MDM enrollment health, and WU scan freshness. Each can be disabled via the config flags.
 
-If everything passes, exit `0` (compliant). If anything fails, exit `1` (non-compliant), Intune triggers `WUDUP-Remediate.ps1`, and the remediation script removes the blockers, resets the WU client state, and triggers an Intune re-sync + WU scan.
+If everything passes, exit `0` (compliant). If anything fails, exit `1` (non-compliant), Intune triggers `Remediation.ps1`, and the remediation script removes the blockers, resets the WU client state, and triggers an Intune re-sync + WU scan.
 
 **For the full check list, registry paths, output format spec, and remediation step details, see [TECHNICAL.md](TECHNICAL.md).**
 
@@ -193,16 +193,6 @@ If everything passes, exit `0` (compliant). If anything fails, exit `1` (non-com
 
 ## Logging
 
-Detect is read-only and writes nothing to disk — its output is stdout only (Intune captures it).
+Detection is read-only and writes nothing to disk — its output is stdout only (Intune captures it).
 
-Remediate appends every run to `%ProgramData%\WUDUP\Logs\remediate.log` with the full numbered action list and before/after values for every change. This persists across runs and is the forensic trail for what was modified on the device.
-
----
-
-## Related
-
-This is the Intune Proactive Remediation component of **WUDUP** (Windows Update Dashboard: Unified Provisioning). The parent repo also contains:
-
-- `WUDUP.ps1` — interactive PowerShell dashboard for auditing and modifying WU configuration on a single device, with backup/restore and a source-switching workflow (WUfB / WSUS / Microsoft Update direct)
-
-The PR scripts and `WUDUP.ps1` share detection logic, blocker lists, and remediation approaches — see `CLAUDE.md` in the repo root for the cross-script consistency rules.
+Remediation appends every run to `%ProgramData%\WUfB-Remediation\remediate.log` with the full numbered action list and before/after values for every change. This persists across runs and is the forensic trail for what was modified on the device.
