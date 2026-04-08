@@ -17,9 +17,9 @@ Both scripts run as SYSTEM, are non-interactive, and produce a numbered, structu
 
 Both scripts emit two different output formats depending on context:
 
-- **Run by Intune as SYSTEM** → a *minimal* summary that fits in the Intune Output column without truncation. Shows just the verdict on line 1 and any failed checks (one per line, with the check number for cross-reference). Nothing else — health context and the full report are written to the on-device log.
+- **Run by Intune as SYSTEM** → a *minimal* summary that fits in the Intune Output column without truncation. Shows just the verdict on line 1 and any failed checks (one per line, with the check number for cross-reference).
 - **Run interactively for testing** → the full verbose report with all 18 checks, current/expected values, registry paths, issues, remediation guidance, health summary, and policy indicators. ANSI color is also enabled (green PASS, red FAIL, yellow SKIP).
-- **Always** → the full verbose report is appended to `%ProgramData%\WUDUP\Logs\detect.log` (or `remediate.log`) on the device, regardless of which output format went to stdout. So you get the clean Intune view AND the complete forensic detail on the device.
+- **Detect is read-only** and writes nothing to disk. **Remediate** appends every change with before/after values to `%ProgramData%\WUDUP\Logs\remediate.log` so you have a forensic trail of what was modified on the device.
 
 ### What Intune sees (compact)
 
@@ -193,12 +193,9 @@ If everything passes, exit `0` (compliant). If anything fails, exit `1` (non-com
 
 ## Logging
 
-Both scripts append to `%ProgramData%\WUDUP\Logs\`:
+Detect is read-only and writes nothing to disk — its output is stdout only (Intune captures it).
 
-- `detect.log` — every detection run with timestamp and outcome
-- `remediate.log` — every remediation run with timestamp and outcome
-
-Logs persist across runs and are useful when troubleshooting devices that keep flipping between compliant and non-compliant.
+Remediate appends every run to `%ProgramData%\WUDUP\Logs\remediate.log` with the full numbered action list and before/after values for every change. This persists across runs and is the forensic trail for what was modified on the device.
 
 ---
 

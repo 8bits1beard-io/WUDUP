@@ -134,7 +134,7 @@ The scripts emit **two different output formats** depending on context, controll
 
 | Context | stdout format | Log file |
 |---------|--------------|----------|
-| **SYSTEM (Intune Proactive Remediation)** | Minimal (built by `Format-CompactOutput`) — verdict on line 1, then for Detect one line per failed check with the check number; for Remediate, any `WARNING` notes for things that couldn't be auto-fixed. No health summary, no log path footer — those live in the on-device log. Typically well under 1 KB. | Full verbose report appended to `detect.log` / `remediate.log` |
+| **SYSTEM (Intune Proactive Remediation)** | Minimal (built by `Format-CompactOutput`) — verdict on line 1, then for Detect one line per failed check with the check number; for Remediate, any `WARNING` notes for things that couldn't be auto-fixed. Typically well under 1 KB. | Detect: no log file (read-only). Remediate: full verbose report appended to `remediate.log` |
 | **Interactive (local testing)** | Full verbose (built by `Format-Output`) — all 18 checks with current/expected/path, issues, remediation, health, policy indicators. ANSI color enabled. | Same full verbose report appended to log |
 
 The full verbose report is **always** written to the log regardless of stdout format, so the Intune view stays clean while the device retains complete forensic detail. `Write-LogReport` adds a `----- [timestamp] -----` separator before each report so the log is easy to scan when investigating a specific run.

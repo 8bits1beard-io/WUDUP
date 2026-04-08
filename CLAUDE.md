@@ -124,7 +124,7 @@ SCCM (with co-management check) → MDM/Intune (with enrollment verification) �
 Invoke-Command -ComputerName $devices -FilePath .\WUDUP.ps1 -ArgumentList @($true)
 ```
 
-Detect and Remediate are uploaded to Intune and run as SYSTEM — they are not meant to be run locally except for manual testing. Both log to `%ProgramData%\WUDUP\Logs\detect.log` and `remediate.log` (append-only).
+Detect and Remediate are uploaded to Intune and run as SYSTEM — they are not meant to be run locally except for manual testing. Detect is read-only and writes nothing to disk; Remediate logs every change to `%ProgramData%\WUDUP\Logs\remediate.log` (append-only).
 
 ### Remediate Configuration
 

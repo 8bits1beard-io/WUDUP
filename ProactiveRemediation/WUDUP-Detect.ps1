@@ -137,34 +137,6 @@ function Get-SafeRegistryValue {
     return $null
 }
 
-$script:LogFilePath = Join-Path $env:ProgramData 'WUDUP\Logs\detect.log'
-
-function Write-Log {
-    param([string]$Message)
-    try {
-        $logDir = Split-Path $script:LogFilePath -Parent
-        if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
-        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        Add-Content -Path $script:LogFilePath -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
-    }
-    catch { }
-}
-
-# Writes the FULL verbose detection report to the log file with a clean separator.
-# Always called regardless of output mode so the device retains the complete report.
-function Write-LogReport {
-    param([string]$Report)
-    try {
-        $logDir = Split-Path $script:LogFilePath -Parent
-        if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
-        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        $separator = "`n----- [$timestamp] -----"
-        Add-Content -Path $script:LogFilePath -Value $separator -ErrorAction SilentlyContinue
-        Add-Content -Path $script:LogFilePath -Value $Report -ErrorAction SilentlyContinue
-    }
-    catch { }
-}
-
 # Builds structured multi-line output for Intune portal display.
 # Intune only uses the exit code for compliance; this text is for admins.
 function Format-Output {
@@ -222,8 +194,7 @@ function Format-Output {
 # Compact output for Intune Proactive Remediation portal display.
 # Intune's Output column is narrow and truncated — admins need to see at a
 # glance what failed, nothing else. Verdict on line 1, one failed check per
-# line after. The full verbose report is always written to detect.log for
-# on-device troubleshooting. Used automatically when running as SYSTEM.
+# line after. Used automatically when running as SYSTEM.
 function Format-CompactOutput {
     param(
         [string]$Result,           # COMPLIANT / NON-COMPLIANT / ERROR
@@ -427,7 +398,6 @@ function Get-LastWUScanStatus {
 # ============================================================================
 
 try {
-    Write-Log "Detection started"
     $indicators = @()
     $checks = @()
     $script:checkNum = 0
@@ -885,8 +855,6 @@ try {
             -Policy $indicators
         $compactMsg = Format-CompactOutput -Result 'NON-COMPLIANT' `
             -FailedChecks $script:FailedChecks
-        # Always log the full verbose report for on-device troubleshooting
-        Write-LogReport -Report $verboseMsg
         # Intune (SYSTEM) gets the compact form; interactive runs get the verbose form
         if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
         exit 1
@@ -905,13 +873,11 @@ try {
         -Policy $indicators
     $compactMsg = Format-CompactOutput -Result 'COMPLIANT' `
         -FailedChecks @()
-    Write-LogReport -Report $verboseMsg
     if ($script:IsSystem) { Write-Output $compactMsg } else { Write-Output $verboseMsg }
     exit 0
 }
 catch {
     $errMsg = "ERROR - Detection failed: $($_.Exception.Message)"
-    Write-Log $errMsg
     # Errors are always short — same in both modes
     Write-Output $errMsg
     exit 1
